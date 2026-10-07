@@ -4,8 +4,8 @@
 # mounted /models volume. The image therefore builds without network access to
 # any model host and runs with HF_HUB_OFFLINE=1 by default.
 #
-# BASE_IMAGE_DIGEST_PLACEHOLDER
-FROM python:3.11-slim AS runtime
+# Digest recorded after a successful `docker compose build` on this arm64 Mac.
+FROM python:3.11-slim@sha256:0dd364ba7e10242f07755449e3a3d0e35f9efd987952737b90def6709ab0c5ce AS runtime
 
 # ffmpeg: audio inspection and extraction.
 # libgomp1: OpenMP runtime required by CTranslate2.
