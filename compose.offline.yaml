@@ -1,0 +1,13 @@
+# Offline override: the worker gets no network interface at all.
+#
+# This is the normal way to run the service. Only the one-off bootstrap needs
+# network, and it runs as a separate throwaway container:
+#
+#   docker compose run --rm -e HF_HUB_OFFLINE=0 subtitles \
+#       nas-subs models install --config /config/config.yaml
+#   docker compose -f compose.yaml -f compose.offline.yaml run --rm subtitles \
+#       nas-subs models verify --offline --config /config/config.yaml
+#   docker compose -f compose.yaml -f compose.offline.yaml up -d
+services:
+  subtitles:
+    network_mode: none

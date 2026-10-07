@@ -1,0 +1,53 @@
+# Base deployment. Zero published ports, no Docker socket, not privileged.
+#
+# Combine with the overrides rather than editing this file:
+#   docker compose -f compose.yaml -f compose.offline.yaml up -d
+#   docker compose -f compose.yaml -f compose.sidecar.yaml up -d
+#
+# The 2 CPUs and 4 GiB below are an initial ceiling, not a measurement of what
+# the workload needs. Revisit them before the pilot and record the change.
+name: nas-subtitles
+
+services:
+  subtitles:
+    build: .
+    image: nas-subtitles:local
+    user: "${APP_UID:-1000}:${APP_GID:-1000}"
+    init: true
+    restart: unless-stopped
+    command: [nas-subs, worker, --config, /config/config.yaml]
+    cpus: "2.0"
+    mem_limit: 4g
+    stop_grace_period: 60s
+    environment:
+      OMP_NUM_THREADS: "2"
+      OPENBLAS_NUM_THREADS: "2"
+      HF_HUB_OFFLINE: "1"
+      XDG_DATA_HOME: /models/xdg
+      XDG_CACHE_HOME: /models/cache
+      HF_HOME: /models/huggingface
+    volumes:
+      # The library is read-only here. Sidecar publication needs the
+      # compose.sidecar.yaml override and publish_mode: sidecar.
+      - type: bind
+        source: ${MEDIA_HOST_PATH:-/nas/media}
+        target: /media
+        read_only: true
+        bind:
+          create_host_path: false
+      - ./config/config.yaml:/config/config.yaml:ro
+      - ./data/state:/state
+      - ./data/work:/work
+      - ./data/models:/models
+      - ./data/output:/output
+    healthcheck:
+      test: [CMD, nas-subs, health, --config, /config/config.yaml]
+      interval: 60s
+      timeout: 10s
+      start_period: 120s
+      retries: 3
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"

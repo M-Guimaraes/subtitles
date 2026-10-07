@@ -1,0 +1,20 @@
+# Sidecar override: replaces the read-only /media bind with read-write, so
+# the SRT can be written next to the video.
+#
+# Two things must be true before this is used:
+#   1. config.yaml sets `publish_mode: sidecar`; the application refuses to
+#      write beside the media otherwise, override or not.
+#   2. the pilot episode has been reviewed in staging.
+#
+# Publication still never overwrites: an existing target name becomes an
+# output_conflict. Write permission is only needed on the directories that
+# actually receive a subtitle; do not chmod or chown the library.
+services:
+  subtitles:
+    volumes:
+      - type: bind
+        source: ${MEDIA_HOST_PATH:-/nas/media}
+        target: /media
+        read_only: false
+        bind:
+          create_host_path: false

@@ -1,0 +1,68 @@
+#!/usr/bin/env bash
+#
+# Start the nas-subtitles worker, but only once the library is actually
+# mounted. Running with an unmounted media path would make the scanner see an
+# empty library, so this refuses to start instead.
+#
+# Intended for the Linux host that owns the pool. `mountpoint` is part of
+# util-linux and is not available on macOS.
+#
+# To hook this into an existing nas-start script, add one line *after* the
+# pool import and verification step:
+#
+#     /home/USER/nas-subtitles/scripts/nas-subtitles-start
+#
+# This script does not modify, recreate or source any existing NAS script.
+set -euo pipefail
+
+PROJECT_DIR="${NAS_SUBTITLES_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
+MOUNT_PATH="${NAS_SUBTITLES_MOUNT:-/nas/media}"
+
+cd "$PROJECT_DIR"
+
+if [[ -f .env ]]; then
+    # shellcheck disable=SC1091
+    set -a && . ./.env && set +a
+fi
+
+if [[ ! -f config/config.yaml ]]; then
+    echo "nas-subtitles: config/config.yaml is missing; copy config/config.example.yaml" >&2
+    exit 2
+fi
+
+if ! command -v mountpoint >/dev/null 2>&1; then
+    echo "nas-subtitles: 'mountpoint' not found; this script targets a Linux host" >&2
+    exit 3
+fi
+
+if ! mountpoint -q "$MOUNT_PATH"; then
+    echo "nas-subtitles: $MOUNT_PATH is not a mount point; refusing to start" >&2
+    exit 3
+fi
+
+# Each configured root must exist inside the mount. A missing root means the
+# library is only partially mounted, which the worker would otherwise report
+# one job at a time.
+missing=0
+while IFS= read -r root; do
+    [[ -z "$root" ]] && continue
+    host_root="${MEDIA_HOST_PATH:-/nas/media}${root#/media}"
+    if [[ ! -d "$host_root" ]]; then
+        echo "nas-subtitles: configured media root is missing on the host: $host_root" >&2
+        missing=1
+    fi
+done < <(sed -n 's/^media_roots:[[:space:]]*\[\(.*\)\]/\1/p' config/config.yaml | tr ',' '\n' | tr -d ' ')
+
+if [[ "$missing" -ne 0 ]]; then
+    exit 3
+fi
+
+for dir in data/state data/work data/models data/output; do
+    mkdir -p "$dir"
+done
+
+exec docker compose \
+    --project-directory "$PROJECT_DIR" \
+    -f "$PROJECT_DIR/compose.yaml" \
+    -f "$PROJECT_DIR/compose.offline.yaml" \
+    up -d
