@@ -35,7 +35,7 @@ from .domain import (
     JobRecord,
     JobState,
     NasSubtitlesError,
-    PublishMode,
+    PublishOutcome,
     exit_code_for,
 )
 from .health import check_health
@@ -473,9 +473,23 @@ def publish(
     """
     with _handled(as_json=json_output):
         config = _load(config_path)
-        if config.publish_mode is PublishMode.SIDECAR:
-            output.supports_atomic_publish(config.output_dir)
-        repository.open_repository(config)
+        repo = repository.open_repository(config)
+        job = repo.require_job(job_id)
+        result = output.publish_job(config, repo, job)
+        ok = result.outcome is PublishOutcome.PUBLISHED
+        _emit(
+            {
+                "ok": ok,
+                "outcome": str(result.outcome),
+                "target": str(result.target_path),
+            },
+            as_json=json_output,
+            text=f"{result.outcome} {result.target_path}",
+        )
+        if result.outcome is PublishOutcome.CONFLICT:
+            raise typer.Exit(int(ExitCode.REVIEW_REQUIRED))
+        if not ok:
+            raise typer.Exit(int(ExitCode.PROCESSING_FAILED))
 
 
 @app.command()
