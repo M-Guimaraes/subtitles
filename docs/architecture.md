@@ -22,7 +22,7 @@ flowchart TD
   render --> validate[validate]
   validate --> staging[SRT and manifest in output]
   staging --> review{Gates}
-  review -->|structurally valid, no flags| done[completed in staging]
+  review -->|structurally valid, no flags| done[ready_to_publish in staging]
   review -->|soft flags| needs[needs_review]
   needs --> approve[jobs approve]
   approve --> ready[ready_to_publish]

@@ -181,14 +181,23 @@ def _doctor_checks(config: AppConfig) -> list[DoctorCheck]:
         )
     )
 
-    checks.append(DoctorCheck("models", "pending", "verified by `nas-subs models verify`"))
-    checks.append(
-        DoctorCheck(
-            "atomic_publish",
-            "pending",
-            "hard-link probe lands with the publication stage",
+    try:
+        verified = models.verify_models(config, offline=True)
+        checks.append(DoctorCheck("models", "ok", f"{len(verified)} models loadable offline"))
+    except NasSubtitlesError as exc:
+        status: CheckStatus = "fail" if exc.code is ErrorCode.MODEL_MISSING else "warn"
+        checks.append(DoctorCheck("models", status, exc.message))
+
+    if output.supports_atomic_publish(config.output_dir):
+        checks.append(DoctorCheck("atomic_publish", "ok", "hard links work on output_dir"))
+    else:
+        checks.append(
+            DoctorCheck(
+                "atomic_publish",
+                "fail",
+                "exclusive hard-link publish is not supported on output_dir",
+            )
         )
-    )
     return checks
 
 
@@ -534,8 +543,50 @@ def benchmark(
     """Measure throughput, RTF and peak memory on a short window."""
     with _handled(as_json=json_output):
         config = _load(config_path)
-        discovery.resolve_explicit_path(config, path)
-        raise NotImplementedError("`benchmark` lands with the delivery stage (8)")
+        repo = repository.open_repository(config)
+        with repository.StateDirLock(config.lock_path):
+            job, skipped = discovery.enqueue_path(
+                config,
+                repo,
+                path,
+                preview_seconds=float(seconds),
+                preview_offset_seconds=0.0,
+                require_stability=False,
+            )
+            if skipped is not None:
+                _emit(
+                    {"ok": False, "reason": skipped},
+                    as_json=json_output,
+                    text=skipped,
+                )
+                raise typer.Exit(int(ExitCode.REVIEW_REQUIRED))
+            assert job is not None
+            from time import perf_counter
+
+            from .pipeline import build_context, run_job
+
+            started = perf_counter()
+            result = run_job(build_context(config, repo, job))
+            elapsed = perf_counter() - started
+            rtf = elapsed / result.media_seconds if result.media_seconds else None
+            payload = {
+                "ok": True,
+                "job_id": result.job_id,
+                "elapsed_seconds": round(elapsed, 3),
+                "media_seconds": result.media_seconds,
+                "realtime_factor": None if rtf is None else round(rtf, 3),
+                "cues": result.cue_count,
+                "architecture": platform.machine(),
+                "note": "measured on this host only; not a NAS result",
+            }
+            _emit(
+                payload,
+                as_json=json_output,
+                text=(
+                    f"{elapsed:.1f}s for {result.media_seconds:.1f}s audio "
+                    f"RTF={rtf if rtf is not None else 'n/a'} on {platform.machine()}"
+                ),
+            )
 
 
 # --------------------------------------------------------------------------- #
