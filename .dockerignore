@@ -1,0 +1,56 @@
+# Keep the build context small and free of anything personal.
+# The image gets the source, pyproject.toml and uv.lock, nothing else.
+
+.git/
+.gitignore
+.github/
+
+# Virtualenvs and caches
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage*
+htmlcov/
+
+# Runtime data and models: mounted as volumes, never baked into the image
+data/
+state/
+work/
+output/
+models/
+*.sqlite3*
+*.bin
+*.ct2
+*.argosmodel
+*.pt
+*.onnx
+
+# Local configuration and secrets
+config/config.yaml
+.env
+
+# Media and generated subtitles
+*.mkv
+*.mp4
+*.m4v
+*.avi
+*.mov
+*.wav
+*.srt
+*.vtt
+*.ass
+
+# Documentation and tests are not needed at runtime
+docs/
+tests/
+*.md
+!README.md
+
+.DS_Store

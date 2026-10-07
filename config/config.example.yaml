@@ -1,0 +1,48 @@
+# nas-subtitles configuration.
+#
+# Every path here is a path *inside the container* and must be absolute.
+# Copy this file to config/config.yaml and adjust the media roots; the
+# container mounts the host library read-only at /media.
+#
+# Defaults are product decisions, not measurements. Revisit them after the
+# pilot benchmark instead of changing them silently.
+
+media_roots: [/media/library/series, /media/library/movies]
+state_dir: /state
+work_dir: /work
+models_dir: /models
+output_dir: /output
+publish_mode: staging
+target_language: pt-BR
+scan_interval_seconds: 600
+stability_window_seconds: 600
+minimum_file_age_seconds: 600
+minimum_free_work_gib: 3
+worker:
+  concurrency: 1
+  cpu_threads: 2
+  retry_delays_seconds: [300, 1800, 7200]
+  stale_lease_seconds: 180
+  heartbeat_seconds: 30
+asr:
+  model: small
+  device: cpu
+  compute_type: int8
+  beam_size: 5
+  word_timestamps: true
+  vad_filter: true
+  condition_on_previous_text: false
+  chunk_seconds: 300
+  overlap_seconds: 2
+  detection_min_probability: 0.80
+translation:
+  engine: argos
+  allowed_pairs: [en:pt]
+  allow_pivot: false
+subtitles:
+  max_lines: 2
+  max_chars_per_line: 42
+  target_max_chars_per_second: 20
+  min_duration_seconds: 1.0
+  max_duration_seconds: 7.0
+  write_source_srt: false

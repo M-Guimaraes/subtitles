@@ -1,0 +1,97 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.venv/
+venv/
+
+# Tooling caches
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
+
+# Runtime data: queue database, work files, models and generated subtitles.
+# None of this belongs in version control.
+/data/
+/state/
+/work/
+/output/
+/models/
+*.sqlite3
+*.sqlite3-wal
+*.sqlite3-shm
+*.db
+
+# Local configuration and secrets
+/config/config.yaml
+.env
+
+# Models and model caches
+*.bin
+*.ct2
+*.argosmodel
+*.pt
+*.onnx
+huggingface/
+xdg/
+
+# Media and generated subtitles: never commit personal library content
+*.mkv
+*.mp4
+*.m4v
+*.avi
+*.mov
+*.wav
+*.srt
+*.vtt
+*.ass
+# Small, synthetic, hand-checked expectations may be committed here.
+!/tests/fixtures/expected/**
+
+# OS noise
+.DS_Store
+
+# Additional model weight and cache formats
+*.safetensors
+*.gguf
+*.pth
+*.h5
+*.npz
+*.tflite
+.cache/
+argos-translate/
+
+# Additional media containers and audio tracks
+*.webm
+*.mpg
+*.mpeg
+*.m2ts
+*.flv
+*.wmv
+*.mp3
+*.m4a
+*.flac
+*.aac
+*.ogg
+*.opus
+
+# Additional subtitle sidecars
+*.sub
+*.idx
+*.ssa
+*.sup
+
+# Additional SQLite artefacts
+*.sqlite
+*.db-wal
+*.db-shm
+
+# Environment files: only the documented template may be committed
+.env.*
+!.env.example
