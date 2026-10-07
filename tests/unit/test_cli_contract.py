@@ -77,9 +77,7 @@ def test_health_is_unhealthy_without_a_database(config_path: Path) -> None:
     assert payload["database_reachable"] is False
 
 
-def test_health_is_healthy_with_a_recent_heartbeat(
-    config: AppConfig, config_path: Path
-) -> None:
+def test_health_is_healthy_with_a_recent_heartbeat(config: AppConfig, config_path: Path) -> None:
     _seed_heartbeat(config, age_seconds=5)
     result = runner.invoke(app, ["health", "--config", str(config_path), "--json"])
     assert result.exit_code == int(ExitCode.SUCCESS)
@@ -88,9 +86,7 @@ def test_health_is_healthy_with_a_recent_heartbeat(
     assert payload["heartbeat_age_seconds"] < config.worker.stale_lease_seconds
 
 
-def test_health_is_unhealthy_with_a_stale_heartbeat(
-    config: AppConfig, config_path: Path
-) -> None:
+def test_health_is_unhealthy_with_a_stale_heartbeat(config: AppConfig, config_path: Path) -> None:
     _seed_heartbeat(config, age_seconds=config.worker.stale_lease_seconds + 60)
     result = runner.invoke(app, ["health", "--config", str(config_path), "--json"])
     assert result.exit_code == int(ExitCode.PREFLIGHT_FAILED)

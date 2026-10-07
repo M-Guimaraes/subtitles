@@ -32,6 +32,7 @@ from .config import DEFAULT_CONFIG_PATH, AppConfig, load_config
 from .domain import (
     ErrorCode,
     ExitCode,
+    JobRecord,
     JobState,
     NasSubtitlesError,
     PublishMode,
@@ -464,9 +465,9 @@ def jobs_list(
         repo = repository.open_repository(config)
         records = repo.list_jobs(state=state, limit=limit)
         _emit(
-            {"ok": True, "jobs": [record.id for record in records]},
+            {"ok": True, "jobs": [_job_payload(record) for record in records]},
             as_json=json_output,
-            text="\n".join(f"{record.id} {record.state}" for record in records),
+            text="\n".join(f"{record.id} {record.state}" for record in records) or "(no jobs)",
         )
 
 
@@ -479,7 +480,30 @@ def jobs_show(
     """Show one job with its stage, attempts, artifacts and quality flags."""
     with _handled(as_json=json_output):
         config = _load(config_path)
-        repository.open_repository(config).get_job(job_id)
+        repo = repository.open_repository(config)
+        record = repo.require_job(job_id)
+        artifacts = repo.list_artifacts(job_id=job_id)
+        metrics = repo.get_metrics(job_id)
+        payload = {
+            "ok": True,
+            "job": _job_payload(record),
+            "artifacts": [
+                {"stage": str(item.stage), "chunk_index": item.chunk_index, "sha256": item.sha256}
+                for item in artifacts
+            ],
+            "metrics": None
+            if metrics is None
+            else {
+                "output_cues": metrics.output_cues,
+                "total_seconds": metrics.total_seconds,
+                "quality_flags": [str(flag.code) for flag in metrics.quality_flags],
+            },
+        }
+        text = (
+            f"{record.id} {record.state} stage={record.current_stage} "
+            f"attempts={record.attempt_count}"
+        )
+        _emit(payload, as_json=json_output, text=text)
 
 
 @jobs_app.command("retry")
@@ -491,7 +515,13 @@ def jobs_retry(
     """Send a failed job back to the queue, keeping valid checkpoints."""
     with _handled(as_json=json_output):
         config = _load(config_path)
-        repository.open_repository(config).transition(job_id=job_id, state=JobState.QUEUED)
+        repo = repository.open_repository(config)
+        record = repo.transition(job_id=job_id, state=JobState.QUEUED)
+        _emit(
+            {"ok": True, "job": _job_payload(record)},
+            as_json=json_output,
+            text=f"{record.id} {record.state}",
+        )
 
 
 @jobs_app.command("cancel")
@@ -503,7 +533,13 @@ def jobs_cancel(
     """Cancel a job. Blocks publication and preserves checkpoints."""
     with _handled(as_json=json_output):
         config = _load(config_path)
-        repository.open_repository(config).transition(job_id=job_id, state=JobState.CANCELLED)
+        repo = repository.open_repository(config)
+        record = repo.transition(job_id=job_id, state=JobState.CANCELLED)
+        _emit(
+            {"ok": True, "job": _job_payload(record)},
+            as_json=json_output,
+            text=f"{record.id} {record.state}",
+        )
 
 
 @jobs_app.command("approve")
@@ -519,7 +555,13 @@ def jobs_approve(
     """
     with _handled(as_json=json_output):
         config = _load(config_path)
-        repository.open_repository(config).approve_job(job_id=job_id)
+        repo = repository.open_repository(config)
+        record = repo.approve_job(job_id=job_id)
+        _emit(
+            {"ok": True, "job": _job_payload(record)},
+            as_json=json_output,
+            text=f"{record.id} {record.state} approved_at={record.approved_at}",
+        )
 
 
 # --------------------------------------------------------------------------- #
@@ -579,6 +621,21 @@ def backup(
 # --------------------------------------------------------------------------- #
 # entry point
 # --------------------------------------------------------------------------- #
+
+
+def _job_payload(record: JobRecord) -> dict[str, object]:
+    return {
+        "id": record.id,
+        "state": str(record.state),
+        "root_id": record.root_id,
+        "relative_path": record.relative_path,
+        "current_stage": str(record.current_stage) if record.current_stage else None,
+        "attempt_count": record.attempt_count,
+        "error_code": str(record.error_code) if record.error_code else None,
+        "priority": record.priority,
+        "approved_at": record.approved_at.isoformat() if record.approved_at else None,
+        "output_path": str(record.output_path) if record.output_path else None,
+    }
 
 
 def main() -> None:
