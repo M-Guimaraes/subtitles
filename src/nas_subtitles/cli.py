@@ -40,7 +40,7 @@ from .domain import (
 )
 from .health import check_health
 from .logging_setup import configure_logging
-from .media import FfprobeMediaProbe
+from .media import FfprobeMediaProbe, select_audio_stream
 
 __all__ = ["app", "main"]
 
@@ -328,10 +328,35 @@ def inspect(
         config = _load(config_path)
         root, resolved = discovery.resolve_explicit_path(config, path)
         probe_result = FfprobeMediaProbe().probe(resolved)
+        selected = select_audio_stream(probe_result)
+        existing = discovery.find_existing_subtitles(path=resolved, probe_result=probe_result)
+        payload = {
+            "ok": True,
+            "root_id": root.root_id,
+            "relative_path": root.relative_path_for(resolved),
+            "duration_seconds": probe_result.duration_seconds,
+            "selected_audio_stream_index": selected.index,
+            "selected_audio_language": selected.language,
+            "audio_streams": [
+                {
+                    "index": stream.index,
+                    "language": stream.language,
+                    "codec": stream.codec_name,
+                    "is_default": stream.is_default,
+                    "is_commentary": stream.is_commentary,
+                    "start_time_seconds": stream.start_time_seconds,
+                }
+                for stream in probe_result.audio_streams
+            ],
+            "has_portuguese_subtitle": discovery.has_portuguese_subtitle(existing),
+        }
         _emit(
-            {"ok": True, "root_id": root.root_id, "duration": probe_result.duration_seconds},
+            payload,
             as_json=json_output,
-            text=f"{resolved}: {probe_result.duration_seconds:.1f}s",
+            text=(
+                f"{root.relative_path_for(resolved)}: {probe_result.duration_seconds:.1f}s "
+                f"audio={selected.index} lang={selected.language or 'unknown'}"
+            ),
         )
 
 
@@ -378,8 +403,28 @@ def enqueue(
     """Add one file to the queue after the stability checks."""
     with _handled(as_json=json_output):
         config = _load(config_path)
-        discovery.resolve_explicit_path(config, path)
-        repository.open_repository(config)
+        repo = repository.open_repository(config)
+        job, skipped = discovery.enqueue_path(
+            config,
+            repo,
+            path,
+            source_language=source_language,
+            audio_stream_index=audio_stream_index,
+            priority=priority,
+        )
+        if skipped is not None:
+            _emit(
+                {"ok": True, "enqueued": False, "reason": skipped},
+                as_json=json_output,
+                text=skipped,
+            )
+            return
+        assert job is not None
+        _emit(
+            {"ok": True, "enqueued": True, "job": _job_payload(job)},
+            as_json=json_output,
+            text=f"{job.id} {job.state}",
+        )
 
 
 @app.command()

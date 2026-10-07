@@ -110,9 +110,13 @@ def test_missing_configuration_exits_with_two(tmp_path: Path) -> None:
     assert result.exit_code == int(ExitCode.INVALID_INPUT)
 
 
-def test_unimplemented_command_reports_a_structured_failure(config_path: Path) -> None:
+def test_unimplemented_command_reports_a_structured_failure(
+    config: AppConfig, config_path: Path, media_root: Path
+) -> None:
     """Stubs must fail with a code, not a traceback."""
-    result = runner.invoke(app, ["scan", "--once", "--config", str(config_path), "--json"])
+    video = media_root / "clip.mkv"
+    video.write_bytes(b"placeholder")
+    result = runner.invoke(app, ["process", str(video), "--config", str(config_path), "--json"])
     assert result.exit_code == int(ExitCode.PROCESSING_FAILED)
     payload = json.loads(result.stderr)
     assert payload["error_code"] == "not_implemented"
