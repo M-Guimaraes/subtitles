@@ -23,6 +23,7 @@ from .domain import (
     TranslatedUnit,
     TranslationCacheEntry,
     TranslationUnit,
+    Translator,
     Word,
     stable_digest,
     stable_unit_id,
@@ -238,7 +239,7 @@ def translation_cache_key(
 def translate_with_cache(
     units: Sequence[TranslationUnit],
     *,
-    translator: ArgosTranslator,
+    translator: Translator,
     repository: JobRepository,
 ) -> tuple[TranslatedUnit, ...]:
     """Translate the units that are not cached and persist the new results."""

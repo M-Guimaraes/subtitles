@@ -387,8 +387,40 @@ def process(
     """
     with _handled(as_json=json_output):
         config = _load(config_path)
-        discovery.resolve_explicit_path(config, path)
-        raise NotImplementedError("`process` lands with the pipeline stages (4 to 7)")
+        repo = repository.open_repository(config)
+        with repository.StateDirLock(config.lock_path):
+            job, skipped = discovery.enqueue_path(
+                config,
+                repo,
+                path,
+                source_language=source_language,
+                audio_stream_index=audio_stream_index,
+                preview_seconds=None if preview_seconds is None else float(preview_seconds),
+                preview_offset_seconds=float(preview_offset_seconds),
+                require_stability=preview_seconds is None,
+            )
+            if skipped is not None:
+                _emit(
+                    {"ok": True, "skipped": True, "reason": skipped},
+                    as_json=json_output,
+                    text=skipped,
+                )
+                return
+            assert job is not None
+            from .pipeline import build_context, run_job
+
+            result = run_job(build_context(config, repo, job))
+            _emit(
+                {
+                    "ok": True,
+                    "job_id": result.job_id,
+                    "state": str(result.state),
+                    "cues": result.cue_count,
+                    "output": str(result.output_path) if result.output_path else None,
+                },
+                as_json=json_output,
+                text=f"{result.job_id} {result.state} cues={result.cue_count}",
+            )
 
 
 @app.command()

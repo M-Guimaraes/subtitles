@@ -116,7 +116,7 @@ def test_unimplemented_command_reports_a_structured_failure(
     """Stubs must fail with a code, not a traceback."""
     video = media_root / "clip.mkv"
     video.write_bytes(b"placeholder")
-    result = runner.invoke(app, ["process", str(video), "--config", str(config_path), "--json"])
+    result = runner.invoke(app, ["benchmark", str(video), "--config", str(config_path), "--json"])
     assert result.exit_code == int(ExitCode.PROCESSING_FAILED)
     payload = json.loads(result.stderr)
     assert payload["error_code"] == "not_implemented"

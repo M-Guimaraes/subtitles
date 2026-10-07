@@ -1028,6 +1028,7 @@ class JobRepository(Protocol):
         source_language_override: str | None = None,
         audio_stream_index_override: int | None = None,
         preview_seconds: Seconds | None = None,
+        preview_offset_seconds: Seconds | None = None,
     ) -> JobRecord: ...
 
     def get_job(self, job_id: JobId) -> JobRecord | None: ...

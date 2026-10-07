@@ -360,6 +360,8 @@ def enqueue_path(
     source_language: str | None = None,
     audio_stream_index: int | None = None,
     priority: int = 0,
+    preview_seconds: float | None = None,
+    preview_offset_seconds: float | None = None,
     require_stability: bool = True,
     now: datetime | None = None,
     probe: FfprobeMediaProbe | None = None,
@@ -397,6 +399,8 @@ def enqueue_path(
         priority=priority,
         source_language_override=source_language,
         audio_stream_index_override=audio_stream_index,
+        preview_seconds=preview_seconds,
+        preview_offset_seconds=preview_offset_seconds,
     )
     return job, None
 

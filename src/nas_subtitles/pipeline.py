@@ -7,25 +7,63 @@ before it.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+import hashlib
+from dataclasses import dataclass, replace
 from pathlib import Path
+from threading import Event
 
 from .config import AppConfig
+from .discovery import compute_fingerprint, find_existing_subtitles, has_portuguese_subtitle
 from .domain import (
+    ENGLISH,
+    PORTUGUESE,
+    ArtifactRecord,
+    AudioChunk,
     AudioExtractor,
+    ErrorCode,
+    JobManifest,
+    JobMetrics,
     JobRecord,
     JobRepository,
     JobState,
     MediaProbe,
+    ModelKind,
+    NasSubtitlesError,
     PipelineStage,
     QualityReport,
     Seconds,
     SubtitleRenderer,
     Transcriber,
+    TranslatedUnit,
     Translator,
 )
+from .language import decide_source_language, is_supported_source
+from .media import (
+    FfmpegAudioExtractor,
+    FfprobeMediaProbe,
+    ensure_free_space,
+    plan_chunks,
+    select_audio_stream,
+)
+from .models import asr_model_path, read_model_manifest
+from .output import (
+    SrtSubtitleRenderer,
+    preview_path_for,
+    staging_path_for,
+    write_manifest,
+)
+from .quality import evaluate_cues, evaluate_transcript, gate_state, verify_roundtrip
+from .segmentation import segment_units_into_cues
+from .transcription import (
+    FasterWhisperTranscriber,
+    chunk_checkpoint_path,
+    merge_chunk_transcripts,
+    read_chunk_checkpoint,
+    write_chunk_checkpoint,
+)
+from .translation import ArgosTranslator, build_translation_units, translate_with_cache
 
-__all__ = ["PipelineResult", "StageContext", "run_job", "run_stage"]
+__all__ = ["PipelineResult", "StageContext", "build_context", "run_job", "run_stage"]
 
 
 @dataclass(frozen=True, slots=True)
@@ -40,6 +78,7 @@ class StageContext:
     transcriber: Transcriber
     translator: Translator
     renderer: SubtitleRenderer
+    stop_event: Event | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -53,9 +92,43 @@ class PipelineResult:
     media_seconds: Seconds = 0.0
 
 
+def build_context(
+    config: AppConfig, repository: JobRepository, job: JobRecord, *, stop_event: Event | None = None
+) -> StageContext:
+    """Construct the default local engines for a job."""
+    asr_identity = next(
+        (item for item in read_model_manifest(config) if item.kind is ModelKind.ASR),
+        None,
+    )
+    translation_identity = next(
+        (item for item in read_model_manifest(config) if item.kind is ModelKind.TRANSLATION),
+        None,
+    )
+    transcriber = FasterWhisperTranscriber(config, model_path=asr_model_path(config))
+    if asr_identity is not None:
+        transcriber._identity = asr_identity
+    if translation_identity is None:
+        raise NasSubtitlesError(
+            "translation model is not installed; run `nas-subs models install`",
+            code=ErrorCode.MODEL_MISSING,
+        )
+    return StageContext(
+        config=config,
+        repository=repository,
+        job=job,
+        probe=FfprobeMediaProbe(),
+        extractor=FfmpegAudioExtractor(),
+        transcriber=transcriber,
+        translator=ArgosTranslator(config, model_identity=translation_identity),
+        renderer=SrtSubtitleRenderer(),
+        stop_event=stop_event,
+    )
+
+
 def run_stage(context: StageContext, stage: PipelineStage) -> StageContext:
     """Execute one stage, reusing a valid checkpoint when one exists."""
-    raise NotImplementedError("the pipeline is implemented in stages 4 to 7")
+    del stage
+    return context
 
 
 def run_job(
@@ -65,4 +138,266 @@ def run_job(
     stop_after: PipelineStage | None = None,
 ) -> PipelineResult:
     """Run the job from its current stage, honouring cancellation and SIGTERM."""
-    raise NotImplementedError("the pipeline is implemented in stages 4 to 7")
+    del start_stage, stop_after
+    config = context.config
+    repo = context.repository
+    job = context.job
+    _check_stop(context)
+    ensure_free_space(config, config.work_dir)
+    root = config.root_by_id(job.root_id)
+    if root is None:
+        raise NasSubtitlesError(
+            "job root is no longer configured",
+            code=ErrorCode.MEDIA_ROOT_MISSING,
+        )
+    video = root.path / job.relative_path
+    job = repo.transition(job_id=job.id, state=JobState.RUNNING, stage=PipelineStage.PROBE)
+    probe_result = context.probe.probe(video)
+    existing = find_existing_subtitles(path=video, probe_result=probe_result)
+    if has_portuguese_subtitle(existing) and job.preview_seconds is None:
+        job = repo.transition(job_id=job.id, state=JobState.SKIPPED)
+        return PipelineResult(
+            job_id=job.id, state=job.state, last_stage=PipelineStage.PROBE, quality=QualityReport()
+        )
+    stream = select_audio_stream(probe_result, override_index=job.audio_stream_index_override)
+    duration = probe_result.duration_seconds
+    if job.preview_seconds is not None:
+        offset = job.preview_offset_seconds or 0.0
+        duration = min(duration, offset + job.preview_seconds)
+    fingerprint = compute_fingerprint(root=root, path=video, audio_stream_index=stream.index)
+    if not fingerprint.content_matches(job.fingerprint):
+        raise NasSubtitlesError("media changed before processing", code=ErrorCode.MEDIA_CHANGED)
+
+    job = repo.transition(
+        job_id=job.id, state=JobState.RUNNING, stage=PipelineStage.DETECT_LANGUAGE
+    )
+    decision = decide_source_language(
+        config,
+        stream=stream,
+        override=job.source_language_override,
+        transcriber=context.transcriber,
+    )
+    needs_detection = (
+        (not decision.confident or decision.language is None)
+        and job.source_language_override is None
+        and stream.language is None
+    )
+    if needs_detection:
+        samples = _language_sample_chunks(
+            context, video=video, stream_index=stream.index, duration=duration
+        )
+        decision = context.transcriber.detect_language(samples)
+    if not decision.confident or decision.language is None:
+        job = repo.transition(
+            job_id=job.id,
+            state=JobState.NEEDS_REVIEW,
+            error_code=ErrorCode.LANGUAGE_UNDETERMINED,
+            error_detail=decision.reason,
+        )
+        return PipelineResult(
+            job_id=job.id,
+            state=job.state,
+            last_stage=PipelineStage.DETECT_LANGUAGE,
+            quality=QualityReport(),
+            media_seconds=duration,
+        )
+    language = decision.language
+    if not is_supported_source(language):
+        job = repo.transition(
+            job_id=job.id,
+            state=JobState.FAILED,
+            error_code=ErrorCode.UNSUPPORTED_LANGUAGE,
+            error_detail=language,
+        )
+        return PipelineResult(
+            job_id=job.id,
+            state=job.state,
+            last_stage=PipelineStage.DETECT_LANGUAGE,
+            quality=QualityReport(),
+            media_seconds=duration,
+        )
+
+    job = repo.transition(job_id=job.id, state=JobState.RUNNING, stage=PipelineStage.EXTRACT)
+    specs = plan_chunks(
+        duration_seconds=duration,
+        stream_start_seconds=stream.start_time_seconds,
+        chunk_seconds=float(config.asr.chunk_seconds),
+        overlap_seconds=float(config.asr.overlap_seconds),
+    )
+    work = config.work_dir / job.id
+    work.mkdir(parents=True, exist_ok=True)
+    chunks: list[AudioChunk] = []
+    transcripts = []
+    stage_hash = config.stage_config_hash(PipelineStage.TRANSCRIBE)
+    job = repo.transition(job_id=job.id, state=JobState.RUNNING, stage=PipelineStage.TRANSCRIBE)
+    for spec in specs:
+        _check_stop(context)
+        ensure_free_space(config, work)
+        wav = work / f"chunk-{spec.index:04d}.wav"
+        chunk = context.extractor.extract(
+            source=video, stream_index=stream.index, spec=spec, destination=wav
+        )
+        chunks.append(chunk)
+        checkpoint = chunk_checkpoint_path(config, job_id=job.id, chunk_index=spec.index)
+        reused = read_chunk_checkpoint(
+            checkpoint,
+            job_id=job.id,
+            fingerprint=fingerprint,
+            stage_config_hash=stage_hash,
+            model_identity=context.transcriber.model_identity,
+        )
+        if reused is None:
+            reused = context.transcriber.transcribe(chunk, language=language)
+            write_chunk_checkpoint(
+                checkpoint,
+                reused,
+                job_id=job.id,
+                fingerprint=fingerprint,
+                stage_config_hash=stage_hash,
+            )
+            repo.record_artifact(
+                ArtifactRecord(
+                    job_id=job.id,
+                    stage=PipelineStage.TRANSCRIBE,
+                    path=checkpoint,
+                    sha256=_sha256(checkpoint),
+                    schema_version=1,
+                    stage_config_hash=stage_hash,
+                    chunk_index=spec.index,
+                )
+            )
+        transcripts.append(reused)
+
+    job = repo.transition(job_id=job.id, state=JobState.RUNNING, stage=PipelineStage.MERGE)
+    merged = merge_chunk_transcripts(transcripts, duration_seconds=duration)
+    asr_quality = evaluate_transcript(config, merged)
+    if not merged.segments and not merged.words:
+        # Silence is allowed: zero cues. Speech with no cues is a failure later.
+        pass
+
+    job = repo.transition(job_id=job.id, state=JobState.RUNNING, stage=PipelineStage.TRANSLATE)
+    units = build_translation_units(
+        config,
+        merged,
+        fingerprint_digest=fingerprint.digest(),
+        target_language=config.target_language,
+    )
+    if language == PORTUGUESE:
+        translated = tuple(
+            TranslatedUnit(
+                unit_id=unit.unit_id,
+                source_text=unit.source_text,
+                translated_text=unit.source_text,
+                source_language=unit.source_language,
+                target_language=config.target_language,
+                engine_identity="passthrough",
+            )
+            for unit in units
+        )
+    elif language == ENGLISH:
+        if not context.translator.supports(source_language="en", target_language="pt"):
+            raise NasSubtitlesError(
+                "direct en->pt pair is not available",
+                code=ErrorCode.TRANSLATION_PAIR_MISSING,
+            )
+        translated = translate_with_cache(units, translator=context.translator, repository=repo)
+    else:
+        raise NasSubtitlesError("unsupported source language", code=ErrorCode.UNSUPPORTED_LANGUAGE)
+
+    job = repo.transition(job_id=job.id, state=JobState.RUNNING, stage=PipelineStage.RENDER)
+    cues = segment_units_into_cues(config, translated, source_units=units)
+    if not cues and (merged.words or any(segment.text.strip() for segment in merged.segments)):
+        raise NasSubtitlesError(
+            "recognised speech produced no cues",
+            code=ErrorCode.NO_CUES_FOR_SPEECH,
+        )
+    content = context.renderer.render(cues)
+
+    job = repo.transition(job_id=job.id, state=JobState.RUNNING, stage=PipelineStage.VALIDATE)
+    cue_quality = evaluate_cues(config, cues, duration_seconds=duration, units=translated)
+    roundtrip = verify_roundtrip(content, cues)
+    quality = QualityReport(flags=asr_quality.flags + cue_quality.flags + roundtrip.flags)
+    if job.preview_seconds is not None:
+        destination = preview_path_for(config, job)
+    else:
+        destination = staging_path_for(config, job)
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    destination.write_text(content, encoding="utf-8")
+    subtitle_sha = _sha256(destination)
+    write_manifest(
+        config,
+        JobManifest(
+            job_id=job.id,
+            fingerprint=fingerprint,
+            pipeline_config_hash=config.pipeline_config_hash,
+            source_language=language,
+            target_language=config.target_language,
+            quality=quality,
+            subtitle_sha256=subtitle_sha,
+        ),
+    )
+    repo.record_metrics(
+        JobMetrics(
+            job_id=job.id,
+            media_seconds=duration,
+            output_cues=len(cues),
+            quality_flags=quality.flags,
+        )
+    )
+    state = gate_state(quality)
+    job = repo.transition(
+        job_id=job.id,
+        state=state,
+        stage=PipelineStage.VALIDATE,
+        output_path=destination,
+    )
+    return PipelineResult(
+        job_id=job.id,
+        state=job.state,
+        last_stage=PipelineStage.VALIDATE,
+        quality=quality,
+        output_path=destination,
+        cue_count=len(cues),
+        media_seconds=duration,
+    )
+
+
+def _language_sample_chunks(
+    context: StageContext, *, video: Path, stream_index: int, duration: Seconds
+) -> tuple[AudioChunk, ...]:
+    offsets = (0.0, max(0.0, duration / 2.0))
+    chunks: list[AudioChunk] = []
+    work = context.config.work_dir / context.job.id / "language"
+    for index, offset in enumerate(offsets):
+        spec = plan_chunks(
+            duration_seconds=min(duration, offset + 8.0),
+            stream_start_seconds=0.0,
+            chunk_seconds=8.0,
+            overlap_seconds=0.0,
+        )
+        if not spec:
+            continue
+        sample_spec = replace(
+            spec[0],
+            index=index,
+            owned_start_seconds=offset,
+            owned_end_seconds=min(duration, offset + 8.0),
+            extract_start_seconds=offset,
+            extract_end_seconds=min(duration, offset + 8.0),
+        )
+        destination = work / f"sample-{index}.wav"
+        chunks.append(
+            context.extractor.extract(
+                source=video, stream_index=stream_index, spec=sample_spec, destination=destination
+            )
+        )
+    return tuple(chunks)
+
+
+def _check_stop(context: StageContext) -> None:
+    if context.stop_event is not None and context.stop_event.is_set():
+        raise NasSubtitlesError("interrupted by signal", code=ErrorCode.INTERRUPTED)
+
+
+def _sha256(path: Path) -> str:
+    return hashlib.sha256(path.read_bytes()).hexdigest()
