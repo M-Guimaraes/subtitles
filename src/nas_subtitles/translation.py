@@ -1,8 +1,9 @@
 """Local translation with Argos. Owned by stage 5.
 
-Only the direct ``en -> pt`` pair is used. Routing through a third language
-is never enabled implicitly, and an empty translation of a non-empty source
-is an error rather than a success.
+Only the direct Argos pair for the configured target is used (``en -> pb``
+when the public target is ``pt-BR``). Routing through a third language is
+never enabled implicitly, and an empty translation of a non-empty source is
+an error rather than a success.
 """
 
 from __future__ import annotations
@@ -13,7 +14,6 @@ from collections.abc import Sequence
 from .config import AppConfig
 from .domain import (
     ENGLISH,
-    PORTUGUESE,
     TRANSLATION_NORMALIZER_VERSION,
     ErrorCode,
     JobRepository,
@@ -29,7 +29,12 @@ from .domain import (
     stable_unit_id,
 )
 from .language import normalize_language_tag
-from .models import configure_argos_environment, configure_stanza_offline, translation_package_path
+from .models import (
+    configure_argos_environment,
+    configure_stanza_offline,
+    to_argos_language_code,
+    translation_package_path,
+)
 
 __all__ = [
     "ArgosTranslator",
@@ -94,8 +99,8 @@ class ArgosTranslator:
             try:
                 output = argos_translate.translate(
                     source,
-                    unit.source_language,
-                    normalize_language_tag(unit.target_language) or PORTUGUESE,
+                    to_argos_language_code(unit.source_language),
+                    to_argos_language_code(unit.target_language),
                 )
             except Exception as exc:
                 raise NasSubtitlesError(
@@ -126,7 +131,7 @@ class ArgosTranslator:
             return
         configure_argos_environment(self.config)
         configure_stanza_offline()
-        translation_package_path(self.config, source=ENGLISH, target=PORTUGUESE)
+        translation_package_path(self.config, source=ENGLISH, target=self.config.target_language)
         import argostranslate.translate  # noqa: F401  # registers installed packages
 
         configure_argos_environment(self.config)
@@ -232,6 +237,8 @@ def translation_cache_key(
             "text": normalize_for_cache(text),
             "source": normalize_language_tag(source_language) or source_language,
             "target": normalize_language_tag(target_language) or target_language,
+            "argos_source": to_argos_language_code(source_language),
+            "argos_target": to_argos_language_code(target_language),
             "engine": engine_identity,
             "normalizer": TRANSLATION_NORMALIZER_VERSION,
         }

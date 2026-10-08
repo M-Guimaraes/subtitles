@@ -345,6 +345,7 @@ class AppConfig(BaseModel):
             {
                 "schema": CONFIG_HASH_SCHEMA_VERSION,
                 "target_language": self.target_language,
+                "translation_backend": self._translation_backend_identity(),
                 "asr": self.asr.model_dump(mode="json"),
                 "translation": self.translation.model_dump(mode="json"),
                 "subtitles": self.subtitles.model_dump(mode="json"),
@@ -391,6 +392,7 @@ class AppConfig(BaseModel):
                 return {
                     "translation": self.translation.model_dump(mode="json"),
                     "target_language": self.target_language,
+                    "translation_backend": self._translation_backend_identity(),
                     "normalizer": TRANSLATION_NORMALIZER_VERSION,
                 }
             case PipelineStage.RENDER:
@@ -404,6 +406,20 @@ class AppConfig(BaseModel):
                 }
             case _:
                 assert_never(stage)
+
+    def _translation_backend_identity(self) -> dict[str, str]:
+        """Argos from/to codes, so ``en→pb`` is not hashed as ``en→pt``.
+
+        Public ``target_language`` stays ``pt-BR``. The lazy import avoids a
+        module cycle with ``models``.
+        """
+        from .models import to_argos_language_code
+
+        return {
+            "engine": self.translation.engine,
+            "argos_from": to_argos_language_code("en"),
+            "argos_to": to_argos_language_code(self.target_language),
+        }
 
 
 def load_config(path: Path) -> AppConfig:

@@ -11,12 +11,14 @@ import hashlib
 import importlib
 import json
 import os
+import shutil
 import sys
 from pathlib import Path
 from typing import Any
 
 from .config import AppConfig
 from .domain import (
+    ENGLISH,
     ErrorCode,
     ModelIdentity,
     ModelKind,
@@ -26,12 +28,14 @@ from .domain import (
 from .logging_setup import path_token
 
 __all__ = [
+    "ARGOS_LANGUAGE_CODES",
     "MODEL_MANIFEST_FILENAME",
     "asr_model_path",
     "configure_argos_environment",
     "configure_stanza_offline",
     "install_models",
     "read_model_manifest",
+    "to_argos_language_code",
     "translation_package_path",
     "verify_models",
     "write_model_manifest",
@@ -46,6 +50,23 @@ _WHISPER_LICENSE = "MIT (faster-whisper) / Whisper weights per origin"
 _ARGOS_PROBE_PHRASE = "Hello."
 _STANZA_OFFLINE_FLAG = "_nas_subtitles_offline"
 
+ARGOS_LANGUAGE_CODES = {"pt-BR": "pb"}
+"""Public config tags that Argos names differently. ``pb`` is Argos-only."""
+
+
+def to_argos_language_code(language: str) -> str:
+    """Map a public language tag to the code Argos packages use.
+
+    ``pt-BR`` becomes ``pb`` (Portuguese Brazil). Unknown codes pass through,
+    so ``en`` stays ``en``. Callers keep using public tags in config, jobs and
+    SRT names; only Argos install, verify and translate see ``pb``.
+    """
+    return ARGOS_LANGUAGE_CODES.get(language, language)
+
+
+def _argos_pair(*, source: str, target: str) -> tuple[str, str]:
+    return to_argos_language_code(source), to_argos_language_code(target)
+
 
 def asr_model_path(config: AppConfig) -> Path:
     """Absolute local directory of the Whisper model, never a hub alias."""
@@ -53,14 +74,21 @@ def asr_model_path(config: AppConfig) -> Path:
 
 
 def translation_package_path(config: AppConfig, *, source: str, target: str) -> Path:
-    """Absolute local path of the installed Argos package for a direct pair."""
+    """Absolute local path of the installed Argos package for a direct pair.
+
+    ``source`` and ``target`` are public tags (``en``, ``pt-BR``). The search
+    uses Argos codes, so ``pt-BR`` resolves to a ``translate-en_pb-*`` package
+    rather than European ``en_pt``.
+    """
     configure_argos_environment(config)
+    argos_source, argos_target = _argos_pair(source=source, target=target)
     for root in _argos_package_dirs(config):
-        found = _find_pair_directory(root, source=source, target=target)
+        found = _find_pair_directory(root, source=argos_source, target=argos_target)
         if found is not None:
+            _ensure_compatible_stanza(config, found)
             return found
     raise NasSubtitlesError(
-        f"direct {source}->{target} Argos package is not installed under models_dir",
+        f"direct {argos_source}->{argos_target} Argos package is not installed under models_dir",
         code=ErrorCode.TRANSLATION_PAIR_MISSING,
         detail={"path_token": path_token(config.translation_models_dir)},
     )
@@ -91,30 +119,67 @@ def _xdg_argos_packages_dir() -> Path | None:
     return path if path.is_dir() else None
 
 
+def _package_stanza_is_current(package_path: Path) -> bool:
+    """True when this Argos package's Stanza files match Stanza 1.10."""
+    resources_path = package_path / "stanza" / "resources.json"
+    if not resources_path.is_file():
+        return False
+    try:
+        payload = json.loads(resources_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return False
+    english = payload.get("en") if isinstance(payload, dict) else None
+    if not isinstance(english, dict) or "packages" not in english:
+        return False
+    default = english.get("packages", {}).get("default")
+    tokenize = english.get("tokenize")
+    name = default.get("tokenize") if isinstance(default, dict) else None
+    if not name or not isinstance(tokenize, dict) or name not in tokenize:
+        return False
+    model = package_path / "stanza" / "en" / "tokenize" / f"{name}.pt"
+    return model.is_file()
+
+
 def _stanza_bundle_is_current(packages_dir: Path) -> bool:
     """True when bundled Stanza resources match Stanza 1.10 (``packages`` + model file)."""
     if not packages_dir.is_dir():
         return False
-    for child in packages_dir.iterdir():
-        resources_path = child / "stanza" / "resources.json"
-        if not resources_path.is_file():
+    return any(
+        child.is_dir() and _package_stanza_is_current(child) for child in packages_dir.iterdir()
+    )
+
+
+def _current_stanza_dir(config: AppConfig, *, exclude: Path | None = None) -> Path | None:
+    excluded = exclude.resolve() if exclude is not None else None
+    for root in _argos_package_dirs(config):
+        if not root.is_dir():
             continue
-        try:
-            payload = json.loads(resources_path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
-            continue
-        english = payload.get("en") if isinstance(payload, dict) else None
-        if not isinstance(english, dict) or "packages" not in english:
-            continue
-        default = english.get("packages", {}).get("default")
-        tokenize = english.get("tokenize")
-        name = default.get("tokenize") if isinstance(default, dict) else None
-        if not name or not isinstance(tokenize, dict) or name not in tokenize:
-            continue
-        model = child / "stanza" / "en" / "tokenize" / f"{name}.pt"
-        if model.is_file():
-            return True
-    return False
+        for child in root.iterdir():
+            if not child.is_dir():
+                continue
+            if excluded is not None and child.resolve() == excluded:
+                continue
+            if _package_stanza_is_current(child):
+                return child / "stanza"
+    return None
+
+
+def _ensure_compatible_stanza(config: AppConfig, package_path: Path) -> None:
+    """Overlay a Stanza 1.10 bundle when the Argos package ships an older one.
+
+    Official ``translate-en_pb-*`` packages still bundle ``ewt.pt``, which
+    Stanza 1.10 cannot load (``feat_dropout``). A sibling package may already
+    have ``combined.pt`` from a previous install; copying it is local and
+    keeps verify/runtime offline.
+    """
+    if _package_stanza_is_current(package_path):
+        return
+    donor = _current_stanza_dir(config, exclude=package_path)
+    if donor is None:
+        return
+    destination = package_path / "stanza"
+    destination.mkdir(parents=True, exist_ok=True)
+    shutil.copytree(donor, destination, dirs_exist_ok=True)
 
 
 def _argos_package_dirs(config: AppConfig) -> tuple[Path, ...]:
@@ -160,7 +225,7 @@ def configure_argos_environment(config: AppConfig) -> None:
 def configure_stanza_offline() -> None:
     """Force every ``stanza.Pipeline`` used by Argos to stay offline.
 
-    Argos 1.11 ships Stanza tokenize assets inside the ``en->pt`` package, but
+    Argos 1.11 ships Stanza tokenize assets inside the translation package, but
     Stanza 1.10 still defaults to ``download_method=DOWNLOAD_RESOURCES``, which
     hits ``raw.githubusercontent.com`` even when those files are present. The
     bundled ``resources.json`` is also an older schema without a ``packages``
@@ -246,8 +311,9 @@ def verify_models(config: AppConfig, *, offline: bool = True) -> tuple[ModelIden
     """Check that every model in the manifest is present and loadable offline.
 
     A directory on disk is not enough: Whisper must load with
-    ``local_files_only``, and Argos must recognize ``en->pt`` and translate a
-    short probe phrase without touching the network.
+    ``local_files_only``, and Argos must recognize the configured direct pair
+    (``en->pb`` when the public target is ``pt-BR``) and translate a short
+    probe phrase without touching the network.
     """
     del offline  # Verification never reaches the network.
     identities = read_model_manifest(config)
@@ -354,23 +420,29 @@ def _install_argos(config: AppConfig) -> ModelIdentity:
     import argostranslate.package as argos_package
 
     configure_argos_environment(config)
+    public_source = ENGLISH
+    public_target = config.target_language
+    argos_source, argos_target = _argos_pair(source=public_source, target=public_target)
 
     try:
         argos_package.update_package_index()
         available = argos_package.get_available_packages()
     except Exception as exc:
         raise NasSubtitlesError(
-            "could not list Argos packages; the direct en->pt pair was not installed",
+            f"could not list Argos packages; the direct {argos_source}->{argos_target} "
+            "pair was not installed",
             code=ErrorCode.TRANSLATION_PAIR_MISSING,
         ) from exc
     match = [
         package
         for package in available
-        if getattr(package, "from_code", None) == "en" and getattr(package, "to_code", None) == "pt"
+        if getattr(package, "from_code", None) == argos_source
+        and getattr(package, "to_code", None) == argos_target
     ]
     if not match:
         raise NasSubtitlesError(
-            "no direct en->pt Argos package is published; install aborted (no pivot, no API)",
+            f"no direct {argos_source}->{argos_target} Argos package is published; "
+            "install aborted (no pivot, no API)",
             code=ErrorCode.TRANSLATION_PAIR_MISSING,
         )
     package = match[0]
@@ -379,19 +451,22 @@ def _install_argos(config: AppConfig) -> ModelIdentity:
         argos_package.install_from_path(downloaded)
     except Exception as exc:
         raise NasSubtitlesError(
-            "failed to download or install the direct en->pt Argos package",
+            f"failed to download or install the direct {argos_source}->{argos_target} "
+            "Argos package",
             code=ErrorCode.TRANSLATION_PAIR_MISSING,
         ) from exc
-    installed = _argos_runtime_package_path(source="en", target="pt")
+    installed = _argos_runtime_package_path(source=argos_source, target=argos_target)
     if installed is None:
-        installed = translation_package_path(config, source="en", target="pt")
+        installed = translation_package_path(config, source=public_source, target=public_target)
+    else:
+        _ensure_compatible_stanza(config, installed)
     return ModelIdentity(
         kind=ModelKind.TRANSLATION,
-        name="en-pt",
+        name=f"translation:{public_source}:{public_target}",
         path=installed,
         version=str(getattr(package, "package_version", None) or "unknown"),
         sha256=_directory_checksum(installed),
-        source="argos-translate en->pt",
+        source=f"argos-translate {argos_source}->{argos_target}",
         license=_ARGOS_LICENSE,
     )
 
@@ -399,7 +474,10 @@ def _install_argos(config: AppConfig) -> ModelIdentity:
 def _verify_argos_offline(config: AppConfig) -> None:
     configure_argos_environment(config)
     configure_stanza_offline()
-    translation_package_path(config, source="en", target="pt")
+    public_source = ENGLISH
+    public_target = config.target_language
+    argos_source, argos_target = _argos_pair(source=public_source, target=public_target)
+    translation_package_path(config, source=public_source, target=public_target)
     argos_translate = _import_argos_translate()
     configure_argos_environment(config)
     cache_clear = getattr(
@@ -407,16 +485,17 @@ def _verify_argos_offline(config: AppConfig) -> None:
     )
     if callable(cache_clear):
         cache_clear()
-    if not _argos_has_direct_pair(argos_translate, source="en", target="pt"):
+    if not _argos_has_direct_pair(argos_translate, source=argos_source, target=argos_target):
         raise NasSubtitlesError(
-            "Argos does not recognize the installed en->pt pair",
+            f"Argos does not recognize the installed {argos_source}->{argos_target} pair",
             code=ErrorCode.TRANSLATION_PAIR_MISSING,
         )
     try:
-        output = argos_translate.translate(_ARGOS_PROBE_PHRASE, "en", "pt")
+        output = argos_translate.translate(_ARGOS_PROBE_PHRASE, argos_source, argos_target)
     except Exception as exc:
         raise NasSubtitlesError(
-            "Argos could not translate offline with the installed en->pt pair",
+            "Argos could not translate offline with the installed "
+            f"{argos_source}->{argos_target} pair",
             code=ErrorCode.MODEL_MISSING,
         ) from exc
     if not str(output or "").strip():
@@ -431,7 +510,7 @@ def _import_argos_translate() -> Any:
         return importlib.import_module("argostranslate.translate")
     except ImportError as exc:
         raise NasSubtitlesError(
-            "argostranslate is required to verify the en->pt pair",
+            "argostranslate is required to verify the translation pair",
             code=ErrorCode.TRANSLATION_PAIR_MISSING,
         ) from exc
 

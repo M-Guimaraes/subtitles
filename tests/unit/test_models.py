@@ -14,8 +14,12 @@ from nas_subtitles.config import AppConfig
 from nas_subtitles.domain import ErrorCode, ModelIdentity, ModelKind, NasSubtitlesError
 from nas_subtitles.models import (
     _adapt_stanza_resources,
+    _ensure_compatible_stanza,
+    _package_stanza_is_current,
     _stanza_bundle_is_current,
     configure_stanza_offline,
+    to_argos_language_code,
+    translation_package_path,
     verify_models,
     write_model_manifest,
 )
@@ -31,6 +35,63 @@ def _fake_stanza_module() -> tuple[types.SimpleNamespace, list[dict[str, Any]]]:
 
     module = types.SimpleNamespace(Pipeline=FakePipeline)
     return module, recorded
+
+
+def test_to_argos_language_code_maps_pt_br_and_passes_through() -> None:
+    assert to_argos_language_code("pt-BR") == "pb"
+    assert to_argos_language_code("en") == "en"
+    assert to_argos_language_code("pt") == "pt"
+    assert to_argos_language_code("pb") == "pb"
+    assert to_argos_language_code("fr") == "fr"
+
+
+def test_translation_package_path_resolves_pt_br_to_en_pb_not_en_pt(config: AppConfig) -> None:
+    root = config.translation_models_dir
+    european = root / "translate-en_pt-1_9"
+    brazilian = root / "translate-en_pb-1_11"
+    european.mkdir(parents=True)
+    brazilian.mkdir(parents=True)
+    (european / "package").write_text("european", encoding="utf-8")
+    (brazilian / "package").write_text("brazilian", encoding="utf-8")
+
+    found = translation_package_path(config, source="en", target="pt-BR")
+    assert found == brazilian
+    assert "en_pt" not in found.name
+
+
+def test_ensure_compatible_stanza_overlays_current_sibling(config: AppConfig) -> None:
+    root = config.translation_models_dir
+    donor = root / "translate-en_pt-1_9" / "stanza"
+    tokenize = donor / "en" / "tokenize"
+    tokenize.mkdir(parents=True)
+    (tokenize / "combined.pt").write_bytes(b"model")
+    (donor / "resources.json").write_text(
+        '{"en": {"tokenize": {"combined": {}}, "packages": {"default": {"tokenize": "combined"}}}}',
+        encoding="utf-8",
+    )
+    target = root / "translate-en_pb-1_9"
+    stale = target / "stanza" / "en" / "tokenize"
+    stale.mkdir(parents=True)
+    (stale / "ewt.pt").write_bytes(b"old")
+    (target / "stanza" / "resources.json").write_text(
+        '{"en": {"tokenize": {"ewt": {}}, "default_processors": {"tokenize": "ewt"}}}',
+        encoding="utf-8",
+    )
+    assert _package_stanza_is_current(target) is False
+    _ensure_compatible_stanza(config, target)
+    assert _package_stanza_is_current(target) is True
+    assert (target / "stanza" / "en" / "tokenize" / "combined.pt").is_file()
+
+
+def test_translation_package_path_does_not_accept_en_pt_for_pt_br(config: AppConfig) -> None:
+    root = config.translation_models_dir
+    european = root / "translate-en_pt-1_9"
+    european.mkdir(parents=True)
+    (european / "package").write_text("european", encoding="utf-8")
+
+    with pytest.raises(NasSubtitlesError) as raised:
+        translation_package_path(config, source="en", target="pt-BR")
+    assert raised.value.code is ErrorCode.TRANSLATION_PAIR_MISSING
 
 
 def test_configure_stanza_offline_forces_download_method_none(

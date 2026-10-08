@@ -100,6 +100,49 @@ def test_empty_translation_of_speech_is_an_error(config: AppConfig) -> None:
     assert raised.value.code is ErrorCode.EMPTY_TRANSLATION
 
 
+def test_argos_translator_calls_backend_with_en_pb_for_pt_br(
+    config: AppConfig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls: list[tuple[str, str, str]] = []
+
+    def fake_translate(text: str, source: str, target: str) -> str:
+        calls.append((text, source, target))
+        return "texto"
+
+    import argostranslate.translate as argos_translate
+
+    monkeypatch.setattr(ArgosTranslator, "_ensure_loaded", lambda self: None)
+    monkeypatch.setattr(argos_translate, "translate", fake_translate)
+    translator = ArgosTranslator(
+        config,
+        model_identity=ModelIdentity(
+            kind=ModelKind.TRANSLATION,
+            name="translation:en:pt-BR",
+            path=Path("/models/argos/en_pb"),
+        ),
+    )
+    unit = TranslationUnit(
+        unit_id="u1",
+        source_text="Hello.",
+        start_seconds=0,
+        end_seconds=1,
+        source_language="en",
+        target_language="pt-BR",
+        word_count=1,
+    )
+    result = translator.translate((unit,))
+    assert calls == [("Hello.", "en", "pb")]
+    assert result[0].target_language == "pt-BR"
+    assert result[0].translated_text == "texto"
+
+
+def test_cache_key_distinguishes_argos_en_pb_from_en_pt() -> None:
+    shared = {"text": "hello", "source_language": "en", "engine_identity": "same-engine"}
+    key_br = translation_cache_key(target_language="pt-BR", **shared)
+    key_eu = translation_cache_key(target_language="pt", **shared)
+    assert key_br != key_eu
+
+
 def test_cache_is_skipped_when_engine_identity_changes(config: AppConfig) -> None:
     repo = open_repository(config)
     unit = TranslationUnit(

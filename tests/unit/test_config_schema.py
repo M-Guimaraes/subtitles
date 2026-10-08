@@ -126,6 +126,24 @@ def test_pipeline_hash_is_deterministic_and_ignores_local_paths(
     assert moved.pipeline_config_hash == config.pipeline_config_hash
 
 
+def test_pipeline_hash_distinguishes_argos_en_pb_from_en_pt(
+    config: AppConfig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Public target stays pt-BR; the Argos backend pair still participates in the hash."""
+    pipeline_before = config.pipeline_config_hash
+    translate_before = config.stage_config_hash(PipelineStage.TRANSLATE)
+    transcribe_before = config.stage_config_hash(PipelineStage.TRANSCRIBE)
+
+    monkeypatch.setattr(
+        "nas_subtitles.models.to_argos_language_code",
+        lambda language: "pt" if language == "pt-BR" else language,
+    )
+    assert config.target_language == "pt-BR"
+    assert config.pipeline_config_hash != pipeline_before
+    assert config.stage_config_hash(PipelineStage.TRANSLATE) != translate_before
+    assert config.stage_config_hash(PipelineStage.TRANSCRIBE) == transcribe_before
+
+
 def test_pipeline_hash_changes_with_output_affecting_settings(config: AppConfig) -> None:
     changed = config.model_copy(
         update={"subtitles": config.subtitles.model_copy(update={"max_chars_per_line": 40})}
