@@ -51,6 +51,9 @@ def test_example_config_matches_the_documented_defaults(config: AppConfig) -> No
     assert config.subtitles.min_duration_seconds == pytest.approx(1.0)
     assert config.subtitles.max_duration_seconds == pytest.approx(7.0)
     assert config.subtitles.write_source_srt is False
+    assert config.dashboard.bind == "127.0.0.1"
+    assert config.dashboard.port == 8787
+    assert config.dashboard.token is None
 
 
 def test_derived_paths_live_under_state(config: AppConfig) -> None:
@@ -153,6 +156,13 @@ def test_pipeline_hash_distinguishes_argos_en_pb_from_en_pt(
     assert config.pipeline_config_hash != pipeline_before
     assert config.stage_config_hash(PipelineStage.TRANSLATE) != translate_before
     assert config.stage_config_hash(PipelineStage.TRANSCRIBE) == transcribe_before
+
+
+def test_dashboard_settings_do_not_change_pipeline_hash(config: AppConfig) -> None:
+    changed = config.model_copy(
+        update={"dashboard": config.dashboard.model_copy(update={"port": 9999, "bind": "0.0.0.0"})}
+    )
+    assert changed.pipeline_config_hash == config.pipeline_config_hash
 
 
 def test_pipeline_hash_changes_with_output_affecting_settings(config: AppConfig) -> None:

@@ -47,6 +47,7 @@ __all__ = [
     "AppConfig",
     "AsrConfig",
     "AudioConfig",
+    "DashboardConfig",
     "LanguagesConfig",
     "MediaRoot",
     "SubtitlesConfig",
@@ -291,6 +292,37 @@ class AudioConfig(BaseModel):
         return tuple(normalised)
 
 
+class DashboardConfig(BaseModel):
+    """Listen address for the optional operator dashboard.
+
+    Defaults bind loopback only. The dashboard is not part of the pipeline
+    hash: changing bind or port must not invalidate jobs or checkpoints.
+    ``token`` is a shared secret for LAN deployments; it is never logged.
+    """
+
+    model_config = _STRICT
+
+    bind: str = "127.0.0.1"
+    port: int = Field(default=8787, ge=1, le=65535)
+    token: str | None = None
+
+    @field_validator("bind")
+    @classmethod
+    def _bind_not_empty(cls, value: str) -> str:
+        stripped = value.strip()
+        if not stripped:
+            raise ValueError("dashboard.bind must be a host address")
+        return stripped
+
+    @field_validator("token")
+    @classmethod
+    def _token_optional(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        stripped = value.strip()
+        return stripped or None
+
+
 class SubtitlesConfig(BaseModel):
     model_config = _STRICT
 
@@ -332,6 +364,7 @@ class AppConfig(BaseModel):
     asr: AsrConfig = Field(default_factory=AsrConfig)
     translation: TranslationConfig = Field(default_factory=TranslationConfig)
     subtitles: SubtitlesConfig = Field(default_factory=SubtitlesConfig)
+    dashboard: DashboardConfig = Field(default_factory=DashboardConfig)
 
     # -- validation -------------------------------------------------------- #
 

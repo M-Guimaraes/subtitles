@@ -3,7 +3,8 @@
 Every state change in the application must go through this module so the
 allowed transitions stay testable in one place. ``needs_review`` is never
 reopened by the worker, and cancellation blocks publication while keeping the
-checkpoints on disk.
+checkpoints on disk. An operator may send ``completed``, ``skipped`` or
+``cancelled`` back to ``queued`` (manual reprocess); the worker never does.
 """
 
 from __future__ import annotations
@@ -54,10 +55,10 @@ ALLOWED_TRANSITIONS: Mapping[JobState, frozenset[JobState]] = {
     JobState.READY_TO_PUBLISH: frozenset(
         {JobState.COMPLETED, JobState.CANCELLED, JobState.NEEDS_REVIEW, JobState.FAILED}
     ),
-    JobState.COMPLETED: frozenset(),
-    JobState.SKIPPED: frozenset(),
+    JobState.COMPLETED: frozenset({JobState.QUEUED}),
+    JobState.SKIPPED: frozenset({JobState.QUEUED}),
     JobState.FAILED: frozenset({JobState.QUEUED, JobState.CANCELLED}),
-    JobState.CANCELLED: frozenset(),
+    JobState.CANCELLED: frozenset({JobState.QUEUED}),
 }
 
 

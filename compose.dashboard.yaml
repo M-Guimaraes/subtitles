@@ -1,0 +1,51 @@
+# Optional operator dashboard. Separate service from the worker so stopping
+# this container never stops background processing.
+#
+#   docker compose -f compose.yaml -f compose.offline.yaml -f compose.dashboard.yaml up -d
+#
+# The published port is host loopback only. Do not change that to a public
+# address unless NAS_SUBS_DASHBOARD_TOKEN is set. This UI is administrative
+# and is not safe on the public internet without authentication.
+services:
+  dashboard:
+    build: .
+    image: nas-subtitles:local
+    user: "${APP_UID:-1000}:${APP_GID:-1000}"
+    init: true
+    restart: unless-stopped
+    command:
+      [
+        nas-subs,
+        dashboard,
+        --host,
+        0.0.0.0,
+        --port,
+        "8787",
+        --config,
+        /config/config.yaml,
+      ]
+    environment:
+      HOME: /models/home
+      XDG_CONFIG_HOME: /models/config
+      HF_HUB_OFFLINE: "1"
+      XDG_DATA_HOME: /models/xdg
+      XDG_CACHE_HOME: /models/cache
+      HF_HOME: /models/huggingface
+      NAS_SUBS_DASHBOARD_TOKEN: ${NAS_SUBS_DASHBOARD_TOKEN:-}
+    ports:
+      - "127.0.0.1:8787:8787"
+    volumes:
+      - type: bind
+        source: ${MEDIA_HOST_PATH:-/nas/media}
+        target: /media
+        read_only: true
+        bind:
+          create_host_path: false
+      - ./config/config.yaml:/config/config.yaml:ro
+      - ./data/state:/state
+      - ./data/output:/output
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"

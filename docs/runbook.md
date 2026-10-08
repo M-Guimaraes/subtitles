@@ -193,6 +193,16 @@ docker compose -f compose.yaml -f compose.offline.yaml up -d
 docker compose logs -f subtitles
 ```
 
+The optional dashboard is a second process. Add `compose.dashboard.yaml` and
+open `http://127.0.0.1:8787`. Stopping that container does not stop the
+worker. The host publish is loopback-only; set `NAS_SUBS_DASHBOARD_TOKEN`
+before exposing the port on a LAN.
+
+```bash
+docker compose -f compose.yaml -f compose.offline.yaml -f compose.dashboard.yaml up -d
+uv run nas-subs dashboard --config /absolute/path/to/config/config.yaml
+```
+
 For zero-touch sidecar publishing, add `compose.sidecar.yaml` and set
 `publish_mode: sidecar` as in section 9.
 

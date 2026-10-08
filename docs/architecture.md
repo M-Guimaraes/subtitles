@@ -2,8 +2,10 @@
 
 ## Shape of the system
 
-One process, `nas-subs`. The worker does both the periodic scan and the job
-processing; there is no second scanner daemon. One job runs at a time,
+One worker process, `nas-subs daemon`. The worker does both the periodic scan
+and the job processing; there is no second scanner daemon. The optional
+dashboard is a separate process (`nas-subs dashboard`) that reads the same
+SQLite queue and never takes `worker.lock`. One job runs at a time,
 guarded by a `flock` on `state_dir` (exit code 6 when it is already held) and
 by a `BEGIN IMMEDIATE` claim in SQLite so two processes can never lease the
 same job. Inference never holds the database lock. A heartbeat thread writes
@@ -53,6 +55,8 @@ flowchart TD
 | `states.py` | The only place job state transitions are allowed |
 | `worker.py` | Scan loop, claim, heartbeat, SIGTERM, cleanup, backup |
 | `pipeline.py` | Stage orchestration with checkpoint reuse |
+| `api.py` | Operator actions over the repository; used by the dashboard, not by the worker |
+| `dashboard.py` | Optional LAN HTTP server and static UI; a separate process from the daemon |
 
 The engines sit behind `Protocol`s in `domain.py`: `MediaProbe`,
 `AudioExtractor`, `Transcriber`, `Translator`, `SubtitleRenderer` and

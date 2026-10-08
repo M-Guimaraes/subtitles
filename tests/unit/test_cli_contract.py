@@ -36,6 +36,7 @@ DOCUMENTED_COMMANDS: tuple[tuple[str, ...], ...] = (
     ("health",),
     ("cleanup",),
     ("backup",),
+    ("dashboard",),
 )
 
 
