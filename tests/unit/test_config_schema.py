@@ -168,3 +168,15 @@ def test_every_stage_has_a_hash(config: AppConfig) -> None:
     hashes = {stage: config.stage_config_hash(stage) for stage in PipelineStage}
     assert len(hashes) == len(PipelineStage)
     assert all(len(value) == 64 for value in hashes.values())
+
+
+def test_transcribe_hash_includes_word_dedupe_version(
+    config: AppConfig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    before = config.stage_config_hash(PipelineStage.TRANSCRIBE)
+    pipeline_before = config.pipeline_config_hash
+    merge_before = config.stage_config_hash(PipelineStage.MERGE)
+    monkeypatch.setattr("nas_subtitles.config.TRANSCRIBE_WORD_DEDUPE_VERSION", 2)
+    assert config.stage_config_hash(PipelineStage.TRANSCRIBE) != before
+    assert config.pipeline_config_hash != pipeline_before
+    assert config.stage_config_hash(PipelineStage.MERGE) == merge_before

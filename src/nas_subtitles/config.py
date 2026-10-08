@@ -29,6 +29,7 @@ from .domain import (
     AUDIO_CHANNELS,
     AUDIO_SAMPLE_FORMAT,
     AUDIO_SAMPLE_RATE_HZ,
+    TRANSCRIBE_WORD_DEDUPE_VERSION,
     TRANSLATION_NORMALIZER_VERSION,
     ConfigurationError,
     PipelineStage,
@@ -349,6 +350,7 @@ class AppConfig(BaseModel):
                 "asr": self.asr.model_dump(mode="json"),
                 "translation": self.translation.model_dump(mode="json"),
                 "subtitles": self.subtitles.model_dump(mode="json"),
+                "word_dedupe": TRANSCRIBE_WORD_DEDUPE_VERSION,
             }
         )
 
@@ -385,7 +387,11 @@ class AppConfig(BaseModel):
             case PipelineStage.EXTRACT:
                 return chunking
             case PipelineStage.TRANSCRIBE:
-                return {"asr": asr, "chunking": chunking}
+                return {
+                    "asr": asr,
+                    "chunking": chunking,
+                    "word_dedupe": TRANSCRIBE_WORD_DEDUPE_VERSION,
+                }
             case PipelineStage.MERGE:
                 return chunking
             case PipelineStage.TRANSLATE:

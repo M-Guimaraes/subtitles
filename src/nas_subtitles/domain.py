@@ -42,6 +42,7 @@ __all__ = [
     "STRUCTURAL_FLAG_CODES",
     "SUPPORTED_SOURCE_LANGUAGES",
     "TERMINAL_JOB_STATES",
+    "TRANSCRIBE_WORD_DEDUPE_VERSION",
     "TRANSLATION_NORMALIZER_VERSION",
     "VIDEO_EXTENSIONS",
     "ArtifactRecord",
@@ -122,6 +123,9 @@ MANIFEST_SCHEMA_VERSION = 1
 DB_SCHEMA_VERSION = 1
 TRANSLATION_NORMALIZER_VERSION = 1
 """Bumping this invalidates every cached translation."""
+
+TRANSCRIBE_WORD_DEDUPE_VERSION = 1
+"""Bumping this invalidates transcription checkpoints after merge/dedupe changes."""
 
 HEARTBEAT_EVENT_CODE = "worker_heartbeat"
 """Event code the worker writes periodically and ``health`` reads back."""

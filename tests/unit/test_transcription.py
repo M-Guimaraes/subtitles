@@ -148,3 +148,72 @@ def test_merge_dedupes_overlapping_boundary_tokens_only() -> None:
     # The same word later in time is kept.
     assert any(word.text == "again" for word in merged.words)
     assert any(word.text == "hello" for word in merged.words)
+
+
+def _merge_words(*words: Word) -> tuple[Word, ...]:
+    start = words[0].start_seconds
+    end = words[-1].end_seconds
+    transcript = ChunkTranscript(
+        chunk=_spec(0, 0.0, 600.0, 0.0, 600.0),
+        language="en",
+        segments=(
+            TranscriptSegment(
+                index=0,
+                start_seconds=start,
+                end_seconds=end,
+                text=" ".join(word.text for word in words),
+                words=words,
+            ),
+        ),
+    )
+    return merge_chunk_transcripts((transcript,), duration_seconds=600).words
+
+
+def test_merge_drops_touching_duplicate_when_confidence_splits() -> None:
+    merged = _merge_words(
+        Word(text="means", start_seconds=19.50, end_seconds=19.80, probability=0.9986),
+        Word(text="means", start_seconds=19.80, end_seconds=20.28, probability=0.3833),
+    )
+    assert [word.text for word in merged] == ["means"]
+    assert merged[0].probability == 0.9986
+    assert merged[0].start_seconds == 19.50
+    assert merged[0].end_seconds == 19.80
+
+
+def test_merge_keeps_touching_duplicates_when_both_are_high_confidence() -> None:
+    merged = _merge_words(
+        Word(text="very", start_seconds=30.00, end_seconds=30.30, probability=0.94),
+        Word(text="very", start_seconds=30.30, end_seconds=30.60, probability=0.91),
+    )
+    assert [(word.text, word.probability) for word in merged] == [
+        ("very", 0.94),
+        ("very", 0.91),
+    ]
+
+
+def test_merge_keeps_touching_duplicates_when_probability_is_missing() -> None:
+    merged = _merge_words(
+        Word(text="no", start_seconds=40.00, end_seconds=40.30, probability=None),
+        Word(text="no", start_seconds=40.30, end_seconds=40.60, probability=None),
+    )
+    assert [word.text for word in merged] == ["no", "no"]
+    assert merged[0].probability is None
+    assert merged[1].probability is None
+
+
+def test_merge_keeps_same_token_when_gap_exceeds_boundary_epsilon() -> None:
+    merged = _merge_words(
+        Word(text="means", start_seconds=19.50, end_seconds=19.80, probability=0.9986),
+        Word(text="means", start_seconds=19.83, end_seconds=20.28, probability=0.3833),
+    )
+    assert [word.text for word in merged] == ["means", "means"]
+    assert merged[0].probability == 0.9986
+    assert merged[1].probability == 0.3833
+
+
+def test_merge_never_drops_different_adjacent_tokens() -> None:
+    merged = _merge_words(
+        Word(text="that", start_seconds=19.20, end_seconds=19.50, probability=0.99),
+        Word(text="means", start_seconds=19.50, end_seconds=19.80, probability=0.20),
+    )
+    assert [word.text for word in merged] == ["that", "means"]

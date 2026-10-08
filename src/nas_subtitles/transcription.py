@@ -264,14 +264,22 @@ def read_chunk_checkpoint(
     )
 
 
+HIGH_CONFIDENCE = 0.80
+LOW_CONFIDENCE = 0.60
+BOUNDARY_EPSILON_SECONDS = 0.02
+
+
 def merge_chunk_transcripts(
     transcripts: Sequence[ChunkTranscript], *, duration_seconds: Seconds
 ) -> Transcript:
-    """Order words globally, then drop duplicates across chunk boundaries.
+    """Order words globally, then drop ASR duplicates before segmentation.
 
-    Only equivalent tokens with overlapping intervals are deduplicated, and
-    the more confident version is kept. A phrase legitimately repeated at a
-    different time stays.
+    Equivalent tokens whose intervals truly overlap are collapsed, keeping
+    the more confident occurrence. Consecutive equivalent tokens that only
+    touch (or sit within ``BOUNDARY_EPSILON_SECONDS``) are collapsed only
+    when one is high-confidence and the other is clearly low-confidence.
+    A phrase repeated later, two confident copies, or missing probabilities
+    stay.
     """
     words: list[Word] = []
     language = transcripts[0].language if transcripts else ""
@@ -381,13 +389,34 @@ def _dedupe_overlapping_words(words: Sequence[Word]) -> tuple[Word, ...]:
             previous.start_seconds, word.start_seconds
         )
         if same and overlap:
-            prev_score = previous.probability if previous.probability is not None else -1.0
-            new_score = word.probability if word.probability is not None else -1.0
-            if new_score > prev_score:
-                kept[-1] = word
+            kept[-1] = _higher_confidence(previous, word)
+            continue
+        adjacent = abs(previous.end_seconds - word.start_seconds) <= BOUNDARY_EPSILON_SECONDS
+        if same and adjacent and _high_and_low_confidence(previous, word):
+            kept[-1] = _higher_confidence(previous, word)
             continue
         kept.append(word)
     return tuple(kept)
+
+
+def _higher_confidence(previous: Word, word: Word) -> Word:
+    prev_score = previous.probability if previous.probability is not None else -1.0
+    new_score = word.probability if word.probability is not None else -1.0
+    return word if new_score > prev_score else previous
+
+
+def _high_and_low_confidence(previous: Word, word: Word) -> bool:
+    return (_is_high_confidence(previous.probability) and _is_low_confidence(word.probability)) or (
+        _is_low_confidence(previous.probability) and _is_high_confidence(word.probability)
+    )
+
+
+def _is_high_confidence(probability: float | None) -> bool:
+    return probability is not None and probability >= HIGH_CONFIDENCE
+
+
+def _is_low_confidence(probability: float | None) -> bool:
+    return probability is not None and probability < LOW_CONFIDENCE
 
 
 def _normalize_token(text: str) -> str:
