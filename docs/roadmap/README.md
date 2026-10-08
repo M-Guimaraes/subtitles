@@ -9,7 +9,7 @@ The active feature and status are controlled by `/ROADMAP.md`. Coding agents mus
 1. `000-asr-quality-dedup.md`
 2. `001-auto-processing.md`
 3. `002-language-intelligence.md`
-4. `003-web-dashboard.md` (in progress)
+4. `003-web-dashboard.md`
 5. `004-sonarr-radarr-webhooks.md`
 6. `005-multiple-target-languages.md`
 
