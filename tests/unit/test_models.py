@@ -14,7 +14,9 @@ from nas_subtitles.config import AppConfig
 from nas_subtitles.domain import ErrorCode, ModelIdentity, ModelKind, NasSubtitlesError
 from nas_subtitles.models import (
     _adapt_stanza_resources,
+    _download_stanza_tokenizer,
     _ensure_compatible_stanza,
+    _overlay_stanza_bundle,
     _package_stanza_is_current,
     _stanza_bundle_is_current,
     configure_stanza_offline,
@@ -59,6 +61,32 @@ def test_translation_package_path_resolves_pt_br_to_en_pb_not_en_pt(config: AppC
     assert "en_pt" not in found.name
 
 
+_CURRENT_STANZA_RESOURCES = (
+    '{"en": {"tokenize": {"combined": {}}, "mwt": {"combined": {}},'
+    ' "packages": {"default": {"tokenize": "combined", "mwt": "combined"}}}}'
+)
+_STALE_STANZA_RESOURCES = (
+    '{"en": {"tokenize": {"ewt": {}}, "default_processors": {"tokenize": "ewt"}}}'
+)
+
+
+def _write_current_stanza_tree(root: Path) -> None:
+    tokenize = root / "en" / "tokenize"
+    mwt = root / "en" / "mwt"
+    tokenize.mkdir(parents=True, exist_ok=True)
+    mwt.mkdir(parents=True, exist_ok=True)
+    (tokenize / "combined.pt").write_bytes(b"model")
+    (mwt / "combined.pt").write_bytes(b"mwt")
+    (root / "resources.json").write_text(_CURRENT_STANZA_RESOURCES, encoding="utf-8")
+
+
+def _write_stale_en_pb(package: Path) -> None:
+    tokenize = package / "stanza" / "en" / "tokenize"
+    tokenize.mkdir(parents=True)
+    (tokenize / "ewt.pt").write_bytes(b"old")
+    (package / "stanza" / "resources.json").write_text(_STALE_STANZA_RESOURCES, encoding="utf-8")
+
+
 def test_ensure_compatible_stanza_overlays_current_sibling(config: AppConfig) -> None:
     root = config.translation_models_dir
     donor = root / "translate-en_pt-1_9" / "stanza"
@@ -70,17 +98,102 @@ def test_ensure_compatible_stanza_overlays_current_sibling(config: AppConfig) ->
         encoding="utf-8",
     )
     target = root / "translate-en_pb-1_9"
-    stale = target / "stanza" / "en" / "tokenize"
-    stale.mkdir(parents=True)
-    (stale / "ewt.pt").write_bytes(b"old")
-    (target / "stanza" / "resources.json").write_text(
-        '{"en": {"tokenize": {"ewt": {}}, "default_processors": {"tokenize": "ewt"}}}',
-        encoding="utf-8",
-    )
+    _write_stale_en_pb(target)
     assert _package_stanza_is_current(target) is False
     _ensure_compatible_stanza(config, target)
     assert _package_stanza_is_current(target) is True
     assert (target / "stanza" / "en" / "tokenize" / "combined.pt").is_file()
+
+
+def test_ensure_compatible_stanza_downloads_when_no_donor(
+    config: AppConfig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    target = config.translation_models_dir / "translate-en_pb-1_9"
+    _write_stale_en_pb(target)
+    recorded: list[dict[str, Any]] = []
+
+    def fake_download(*args: object, **kwargs: object) -> None:
+        recorded.append({"args": args, "kwargs": kwargs})
+        model_dir = Path(str(kwargs["model_dir"]))
+        _write_current_stanza_tree(model_dir)
+
+    module = types.SimpleNamespace(download=fake_download)
+    monkeypatch.setitem(sys.modules, "stanza", module)
+
+    _ensure_compatible_stanza(config, target, allow_download=True)
+
+    assert _package_stanza_is_current(target) is True
+    assert (target / "stanza" / "en" / "tokenize" / "combined.pt").is_file()
+    assert (target / "stanza" / "en" / "mwt" / "combined.pt").is_file()
+    assert recorded
+    assert recorded[0]["args"][0] == "en"
+    assert recorded[0]["kwargs"]["package"] is None
+    assert recorded[0]["kwargs"]["processors"] == {"tokenize": "combined", "mwt": "combined"}
+
+
+def test_ensure_compatible_stanza_download_failure_does_not_accept_ewt(
+    config: AppConfig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    target = config.translation_models_dir / "translate-en_pb-1_9"
+    _write_stale_en_pb(target)
+
+    def fail_download(_model_dir: Path) -> None:
+        raise NasSubtitlesError(
+            "could not prepare compatible Stanza tokenizer for Argos package",
+            code=ErrorCode.MODEL_MISSING,
+        )
+
+    monkeypatch.setattr("nas_subtitles.models._download_stanza_tokenizer", fail_download)
+
+    with pytest.raises(NasSubtitlesError) as raised:
+        _ensure_compatible_stanza(config, target, allow_download=True)
+    assert raised.value.code is ErrorCode.MODEL_MISSING
+    assert "could not prepare compatible Stanza tokenizer for Argos package" in raised.value.message
+    assert _package_stanza_is_current(target) is False
+    assert (target / "stanza" / "en" / "tokenize" / "ewt.pt").is_file()
+    assert not (target / "stanza" / "en" / "tokenize" / "combined.pt").is_file()
+
+
+def test_ensure_compatible_stanza_runtime_does_not_download(
+    config: AppConfig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    target = config.translation_models_dir / "translate-en_pb-1_9"
+    _write_stale_en_pb(target)
+    called = {"download": False}
+
+    def unexpected(_model_dir: Path) -> None:
+        called["download"] = True
+
+    monkeypatch.setattr("nas_subtitles.models._download_stanza_tokenizer", unexpected)
+    _ensure_compatible_stanza(config, target)
+    assert called["download"] is False
+    assert _package_stanza_is_current(target) is False
+
+
+def test_download_stanza_tokenizer_requests_combined_processors(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    recorded: list[dict[str, Any]] = []
+
+    def fake_download(*args: object, **kwargs: object) -> None:
+        recorded.append({"args": args, "kwargs": kwargs})
+
+    monkeypatch.setitem(sys.modules, "stanza", types.SimpleNamespace(download=fake_download))
+    _download_stanza_tokenizer(tmp_path / "stanza-dl")
+    assert recorded[0]["args"][0] == "en"
+    assert recorded[0]["kwargs"]["package"] is None
+    assert recorded[0]["kwargs"]["processors"] == {"tokenize": "combined", "mwt": "combined"}
+
+
+def test_overlay_stanza_bundle_copies_combined_files(tmp_path: Path) -> None:
+    source = tmp_path / "downloaded"
+    _write_current_stanza_tree(source)
+    package = tmp_path / "translate-en_pb-1_9"
+    _write_stale_en_pb(package)
+    _overlay_stanza_bundle(source, package)
+    assert _package_stanza_is_current(package) is True
+    assert (package / "stanza" / "en" / "tokenize" / "combined.pt").is_file()
+    assert (package / "stanza" / "en" / "mwt" / "combined.pt").is_file()
 
 
 def test_translation_package_path_does_not_accept_en_pt_for_pt_br(config: AppConfig) -> None:

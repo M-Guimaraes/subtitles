@@ -13,6 +13,7 @@ import json
 import os
 import shutil
 import sys
+import tempfile
 from pathlib import Path
 from typing import Any
 
@@ -134,7 +135,7 @@ def _package_stanza_is_current(package_path: Path) -> bool:
     default = english.get("packages", {}).get("default")
     tokenize = english.get("tokenize")
     name = default.get("tokenize") if isinstance(default, dict) else None
-    if not name or not isinstance(tokenize, dict) or name not in tokenize:
+    if not name or name == "ewt" or not isinstance(tokenize, dict) or name not in tokenize:
         return False
     model = package_path / "stanza" / "en" / "tokenize" / f"{name}.pt"
     return model.is_file()
@@ -164,22 +165,72 @@ def _current_stanza_dir(config: AppConfig, *, exclude: Path | None = None) -> Pa
     return None
 
 
-def _ensure_compatible_stanza(config: AppConfig, package_path: Path) -> None:
+def _overlay_stanza_bundle(source: Path, package_path: Path) -> None:
+    """Copy a Stanza 1.10 tree onto ``package_path/stanza``."""
+    destination = package_path / "stanza"
+    destination.mkdir(parents=True, exist_ok=True)
+    shutil.copytree(source, destination, dirs_exist_ok=True)
+
+
+def _download_stanza_tokenizer(model_dir: Path) -> None:
+    """Fetch current English tokenize/mwt weights into ``model_dir``.
+
+    Install-only. ``stanza.download`` writes ``resources.json``,
+    ``en/tokenize/combined.pt`` and ``en/mwt/combined.pt``.
+    """
+    try:
+        stanza = importlib.import_module("stanza")
+    except ImportError as exc:
+        raise NasSubtitlesError(
+            "could not prepare compatible Stanza tokenizer for Argos package",
+            code=ErrorCode.MODEL_MISSING,
+        ) from exc
+    model_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        stanza.download(
+            "en",
+            model_dir=str(model_dir),
+            package=None,
+            processors={"tokenize": "combined", "mwt": "combined"},
+        )
+    except NasSubtitlesError:
+        raise
+    except Exception as exc:
+        raise NasSubtitlesError(
+            "could not prepare compatible Stanza tokenizer for Argos package",
+            code=ErrorCode.MODEL_MISSING,
+        ) from exc
+
+
+def _ensure_compatible_stanza(
+    config: AppConfig, package_path: Path, *, allow_download: bool = False
+) -> None:
     """Overlay a Stanza 1.10 bundle when the Argos package ships an older one.
 
     Official ``translate-en_pb-*`` packages still bundle ``ewt.pt``, which
     Stanza 1.10 cannot load (``feat_dropout``). A sibling package may already
     have ``combined.pt`` from a previous install; copying it is local and
-    keeps verify/runtime offline.
+    keeps verify/runtime offline. ``stanza.download`` runs only when
+    ``allow_download`` is set (``models install``), never during translation.
     """
     if _package_stanza_is_current(package_path):
         return
     donor = _current_stanza_dir(config, exclude=package_path)
-    if donor is None:
+    if donor is not None:
+        _overlay_stanza_bundle(donor, package_path)
+        if _package_stanza_is_current(package_path) or not allow_download:
+            return
+    elif not allow_download:
         return
-    destination = package_path / "stanza"
-    destination.mkdir(parents=True, exist_ok=True)
-    shutil.copytree(donor, destination, dirs_exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix="nas-subs-stanza-") as raw:
+        downloaded = Path(raw)
+        _download_stanza_tokenizer(downloaded)
+        _overlay_stanza_bundle(downloaded, package_path)
+    if not _package_stanza_is_current(package_path):
+        raise NasSubtitlesError(
+            "could not prepare compatible Stanza tokenizer for Argos package",
+            code=ErrorCode.MODEL_MISSING,
+        )
 
 
 def _argos_package_dirs(config: AppConfig) -> tuple[Path, ...]:
@@ -458,8 +509,7 @@ def _install_argos(config: AppConfig) -> ModelIdentity:
     installed = _argos_runtime_package_path(source=argos_source, target=argos_target)
     if installed is None:
         installed = translation_package_path(config, source=public_source, target=public_target)
-    else:
-        _ensure_compatible_stanza(config, installed)
+    _ensure_compatible_stanza(config, installed, allow_download=True)
     return ModelIdentity(
         kind=ModelKind.TRANSLATION,
         name=f"translation:{public_source}:{public_target}",
