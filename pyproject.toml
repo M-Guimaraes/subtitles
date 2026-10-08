@@ -13,6 +13,7 @@ dependencies = [
     "faster-whisper",
     "argostranslate",
     "srt",
+    "torch==2.14.1+cpu",
 ]
 
 [project.scripts]
@@ -85,3 +86,12 @@ markers = [
 [tool.coverage.run]
 source = ["nas_subtitles"]
 branch = true
+
+# NAS and CPU-only Docker builds must not pull CUDA/NVIDIA/Triton via Torch.
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true
+
+[tool.uv.sources]
+torch = { index = "pytorch-cpu" }

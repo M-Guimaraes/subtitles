@@ -95,3 +95,8 @@ argos-translate/
 # Environment files: only the documented template may be committed
 .env.*
 !.env.example
+
+# Local experiment snapshots (benchmarks, config, lockfile backups)
+*.bak
+*.bak-*
+*.before-*
