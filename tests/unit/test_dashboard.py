@@ -66,10 +66,11 @@ def _write_manifest(config: AppConfig, job_id: str) -> None:
 
 def test_queue_and_history_views_separate_states(config: AppConfig) -> None:
     service, repo = _service(config)
-    queued = repo.enqueue(fingerprint=_fingerprint("a.mkv"), pipeline_config_hash="h")
     failed = repo.enqueue(fingerprint=_fingerprint("b.mkv"), pipeline_config_hash="h")
-    repo.claim_next_job(owner="w", lease_seconds=60)
+    claimed = repo.claim_next_job(owner="w", lease_seconds=60)
+    assert claimed is not None
     repo.transition(job_id=failed.id, state=JobState.FAILED, error_code=ErrorCode.IO_ERROR)
+    queued = repo.enqueue(fingerprint=_fingerprint("a.mkv"), pipeline_config_hash="h")
     queue = service.list_jobs(view="queue")
     history = service.list_jobs(view="history")
     repo.close()
