@@ -18,6 +18,7 @@ from pathlib import Path
 from .config import AppConfig, MediaRoot
 from .domain import (
     FINGERPRINT_SAMPLE_BYTES,
+    LIBRARY_SCAN_KNOWN_STATES,
     PORTUGUESE,
     PORTUGUESE_SUBTITLE_SUFFIXES,
     VIDEO_EXTENSIONS,
@@ -590,8 +591,19 @@ def _count_ignored_names(
 def _already_queued(
     repository: JobRepository, fingerprint: MediaFingerprint, pipeline_config_hash: str
 ) -> bool:
+    """True when a *full* library job already exists for this execution identity.
+
+    Preview jobs are ignored: ``--preview-seconds`` never produces the library
+    sidecar and must not block automatic processing. Any full-job state in
+    ``LIBRARY_SCAN_KNOWN_STATES`` counts so scans and restarts reuse that row
+    instead of enqueueing a duplicate.
+    """
     digest = fingerprint.digest()
     for job in repository.list_jobs(limit=10_000):
+        if not job.is_library_job():
+            continue
+        if job.state not in LIBRARY_SCAN_KNOWN_STATES:
+            continue
         if job.fingerprint.digest() == digest and job.pipeline_config_hash == pipeline_config_hash:
             return True
     return False

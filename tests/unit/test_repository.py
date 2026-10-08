@@ -18,6 +18,7 @@ from nas_subtitles.domain import (
     EventLevel,
     ExitCode,
     JobEvent,
+    JobExecutionScope,
     JobState,
     LockBusyError,
     MediaFingerprint,
@@ -196,6 +197,24 @@ def test_state_dir_lock_rejects_a_second_holder(config: AppConfig) -> None:
             StateDirLock(config.lock_path).__enter__()
     finally:
         held.__exit__(None, None, None)
+
+
+def test_preview_and_full_jobs_can_coexist_for_the_same_identity(config: AppConfig) -> None:
+    repo = open_repository(config)
+    fingerprint = _fingerprint()
+    preview = repo.enqueue(
+        fingerprint=fingerprint,
+        pipeline_config_hash="cfg-hash",
+        preview_seconds=300.0,
+    )
+    full = repo.enqueue(fingerprint=fingerprint, pipeline_config_hash="cfg-hash")
+    again = repo.enqueue(fingerprint=fingerprint, pipeline_config_hash="cfg-hash")
+    jobs = repo.list_jobs()
+    repo.close()
+    assert preview.execution_scope is JobExecutionScope.PREVIEW
+    assert full.execution_scope is JobExecutionScope.FULL
+    assert again.id == full.id
+    assert len(jobs) == 2
 
 
 def test_jobs_list_and_show_round_trip_through_the_cli(

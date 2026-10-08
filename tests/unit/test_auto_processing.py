@@ -3,8 +3,12 @@
 from __future__ import annotations
 
 import errno
+import json
 import logging
 import os
+import sqlite3
+import uuid
+from dataclasses import asdict
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -15,6 +19,7 @@ from nas_subtitles.cli import app
 from nas_subtitles.config import AppConfig
 from nas_subtitles.discovery import (
     canonical_target_sidecar,
+    compute_fingerprint,
     enqueue_path,
     find_existing_subtitles,
     has_portuguese_subtitle,
@@ -28,6 +33,7 @@ from nas_subtitles.discovery import (
 from nas_subtitles.domain import (
     AudioStreamInfo,
     ErrorCode,
+    JobExecutionScope,
     JobState,
     MediaFingerprint,
     NasSubtitlesError,
@@ -418,6 +424,268 @@ def test_sidecar_appearing_during_skip_policy_is_not_overwritten(
     result = publish_exclusive(content="replacement\n", target=sidecar)
     assert result.outcome is PublishOutcome.CONFLICT
     assert sidecar.read_text(encoding="utf-8") == "already-there"
+
+
+def _legacy_v1_sql() -> str:
+    migrations = Path(__file__).resolve().parents[2] / "src" / "nas_subtitles" / "migrations"
+    return (migrations / "001_initial.sql").read_text(encoding="utf-8")
+
+
+def _insert_v1_preview_jobs(
+    database_path: Path,
+    fingerprint: MediaFingerprint,
+    pipeline_config_hash: str,
+    *,
+    count: int,
+    state: str = "queued",
+) -> tuple[str, ...]:
+    database_path.parent.mkdir(parents=True, exist_ok=True)
+    payload = asdict(fingerprint)
+    now = datetime.now(tz=UTC).isoformat()
+    ids: list[str] = []
+    connection = sqlite3.connect(database_path)
+    try:
+        if (
+            database_path.stat().st_size == 0
+            or not connection.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name='jobs'"
+            ).fetchone()
+        ):
+            connection.executescript(_legacy_v1_sql())
+        for index in range(count):
+            job_id = str(uuid.uuid4())
+            fingerprint_json = json.dumps(payload, sort_keys=True, indent=index or None)
+            connection.execute(
+                """
+                INSERT INTO jobs (
+                    id, root_id, relative_path, fingerprint, pipeline_config_hash,
+                    state, current_stage, priority, attempt_count, created_at, updated_at,
+                    preview_seconds, preview_offset_seconds
+                ) VALUES (?, ?, ?, ?, ?, ?, NULL, 0, 0, ?, ?, ?, NULL)
+                """,
+                (
+                    job_id,
+                    fingerprint.root_id,
+                    fingerprint.relative_path,
+                    fingerprint_json,
+                    pipeline_config_hash,
+                    state,
+                    now,
+                    now,
+                    300.0,
+                ),
+            )
+            ids.append(job_id)
+        connection.commit()
+    finally:
+        connection.close()
+    return tuple(ids)
+
+
+def _full_jobs(jobs: tuple[object, ...]) -> list[object]:
+    return [job for job in jobs if job.is_library_job()]  # type: ignore[union-attr]
+
+
+def test_preview_job_does_not_block_full_scan(config: AppConfig, media_root: Path) -> None:
+    config = _fast_config(config)
+    video = media_root / "episode.mkv"
+    video.write_bytes(b"media-bytes")
+    repo = open_repository(config)
+    now = datetime.now(tz=UTC)
+    _stabilize(config, repo, video, now=now)
+    preview = repo.enqueue(
+        fingerprint=compute_fingerprint(root=config.roots[0], path=video, audio_stream_index=1),
+        pipeline_config_hash=config.pipeline_config_hash,
+        preview_seconds=300.0,
+    )
+    summary = scan(config, repo, now=now, probe=_FakeProbe())
+    jobs = repo.list_jobs()
+    repo.close()
+    assert preview.execution_scope is JobExecutionScope.PREVIEW
+    assert summary.enqueued == 1
+    assert summary.already_queued == 0
+    assert len(_full_jobs(jobs)) == 1
+    assert any(job.id == preview.id and not job.is_library_job() for job in jobs)
+
+
+def test_multiple_previews_still_enqueue_one_full(config: AppConfig, media_root: Path) -> None:
+    config = _fast_config(config)
+    video = media_root / "episode.mkv"
+    video.write_bytes(b"media-bytes")
+    repo = open_repository(config)
+    now = datetime.now(tz=UTC)
+    _stabilize(config, repo, video, now=now)
+    fingerprint = compute_fingerprint(root=config.roots[0], path=video, audio_stream_index=1)
+    preview_ids = [
+        repo.enqueue(
+            fingerprint=fingerprint,
+            pipeline_config_hash=config.pipeline_config_hash,
+            preview_seconds=300.0,
+        ).id
+        for _ in range(3)
+    ]
+    summary = scan(config, repo, now=now, probe=_FakeProbe())
+    jobs = repo.list_jobs()
+    repo.close()
+    assert summary.enqueued == 1
+    assert len(_full_jobs(jobs)) == 1
+    assert {job.id for job in jobs if not job.is_library_job()} == set(preview_ids)
+
+
+def test_preview_needs_review_does_not_block_full(config: AppConfig, media_root: Path) -> None:
+    config = _fast_config(config)
+    video = media_root / "episode.mkv"
+    video.write_bytes(b"media-bytes")
+    repo = open_repository(config)
+    now = datetime.now(tz=UTC)
+    _stabilize(config, repo, video, now=now)
+    preview = repo.enqueue(
+        fingerprint=compute_fingerprint(root=config.roots[0], path=video, audio_stream_index=1),
+        pipeline_config_hash=config.pipeline_config_hash,
+        preview_seconds=300.0,
+    )
+    repo.transition(job_id=preview.id, state=JobState.RUNNING)
+    repo.transition(job_id=preview.id, state=JobState.NEEDS_REVIEW)
+    summary = scan(config, repo, now=now, probe=_FakeProbe())
+    jobs = repo.list_jobs()
+    repo.close()
+    assert repo_job_state(jobs, preview.id) is JobState.NEEDS_REVIEW
+    assert summary.enqueued == 1
+    assert len(_full_jobs(jobs)) == 1
+
+
+def repo_job_state(jobs: tuple[object, ...], job_id: str) -> JobState:
+    for job in jobs:
+        if job.id == job_id:  # type: ignore[union-attr]
+            return job.state  # type: ignore[union-attr,no-any-return]
+    raise AssertionError(f"missing job {job_id}")
+
+
+def test_existing_full_job_is_not_duplicated(config: AppConfig, media_root: Path) -> None:
+    config = _fast_config(config)
+    video = media_root / "episode.mkv"
+    video.write_bytes(b"media-bytes")
+    repo = open_repository(config)
+    now = datetime.now(tz=UTC)
+    _stabilize(config, repo, video, now=now)
+    first = scan(config, repo, now=now, probe=_FakeProbe())
+    second = scan(config, repo, now=now + timedelta(seconds=1), probe=_FakeProbe())
+    jobs = repo.list_jobs()
+    repo.close()
+    assert first.enqueued == 1
+    assert second.enqueued == 0
+    assert second.already_queued == 1
+    assert len(_full_jobs(jobs)) == 1
+
+
+def test_restart_reconciliation_does_not_duplicate_full(
+    config: AppConfig, media_root: Path
+) -> None:
+    config = _fast_config(config)
+    video = media_root / "episode.mkv"
+    video.write_bytes(b"media-bytes")
+    repo = open_repository(config)
+    now = datetime.now(tz=UTC)
+    _stabilize(config, repo, video, now=now)
+    scan(config, repo, now=now, probe=_FakeProbe())
+    full = _full_jobs(repo.list_jobs())[0]
+    repo.transition(job_id=full.id, state=JobState.RUNNING)  # type: ignore[union-attr]
+    worker = Worker(config, repo, owner="test")
+    recovered = worker.recover_interrupted_jobs()
+    again = scan(config, repo, now=now + timedelta(seconds=2), probe=_FakeProbe())
+    jobs = repo.list_jobs()
+    repo.close()
+    assert recovered == 1
+    assert again.enqueued == 0
+    assert len(_full_jobs(jobs)) == 1
+
+
+def test_preview_and_full_together_do_not_create_second_full(
+    config: AppConfig, media_root: Path
+) -> None:
+    config = _fast_config(config)
+    video = media_root / "episode.mkv"
+    video.write_bytes(b"media-bytes")
+    repo = open_repository(config)
+    now = datetime.now(tz=UTC)
+    _stabilize(config, repo, video, now=now)
+    fingerprint = compute_fingerprint(root=config.roots[0], path=video, audio_stream_index=1)
+    preview = repo.enqueue(
+        fingerprint=fingerprint,
+        pipeline_config_hash=config.pipeline_config_hash,
+        preview_seconds=300.0,
+    )
+    scan(config, repo, now=now, probe=_FakeProbe())
+    again = scan(config, repo, now=now + timedelta(seconds=1), probe=_FakeProbe())
+    jobs = repo.list_jobs()
+    repo.close()
+    assert again.enqueued == 0
+    assert again.already_queued == 1
+    assert len(_full_jobs(jobs)) == 1
+    assert any(job.id == preview.id for job in jobs)
+
+
+def test_sidecar_still_skips_when_preview_exists(config: AppConfig, media_root: Path) -> None:
+    config = _fast_config(config)
+    video = media_root / "episode.mkv"
+    video.write_bytes(b"media-bytes")
+    sidecar = canonical_target_sidecar(video, config.target_language)
+    sidecar.write_text("keep-me", encoding="utf-8")
+    repo = open_repository(config)
+    now = datetime.now(tz=UTC)
+    _stabilize(config, repo, video, now=now)
+    fingerprint = compute_fingerprint(root=config.roots[0], path=video, audio_stream_index=1)
+    repo.enqueue(
+        fingerprint=fingerprint,
+        pipeline_config_hash=config.pipeline_config_hash,
+        preview_seconds=300.0,
+    )
+    summary = scan(config, repo, now=now, probe=_FakeProbe())
+    jobs = repo.list_jobs()
+    repo.close()
+    assert summary.enqueued == 0
+    assert summary.skipped_existing_subtitle == 1
+    assert sidecar.read_text(encoding="utf-8") == "keep-me"
+    assert not any(
+        job.is_library_job() and job.state is JobState.QUEUED
+        for job in jobs  # type: ignore[union-attr]
+    )
+
+
+def test_v1_sqlite_preview_rows_migrate_and_do_not_block_full(
+    config: AppConfig, media_root: Path
+) -> None:
+    config = _fast_config(config)
+    video = media_root / "Dexter.S03E01.1080p.5.1Ch.BluRay.ReEnc-DeeJayAhmed.mkv"
+    video.write_bytes(b"media-bytes")
+    now = datetime.now(tz=UTC)
+    age = config.stability_window_seconds + 5
+    stamp = now.timestamp() - age
+    os.utime(video, (stamp, stamp))
+    fingerprint = compute_fingerprint(root=config.roots[0], path=video, audio_stream_index=1)
+    preview_ids = _insert_v1_preview_jobs(
+        config.database_path,
+        fingerprint,
+        config.pipeline_config_hash,
+        count=5,
+        state="needs_review",
+    )
+    repo = open_repository(config)
+    migrated = repo.list_jobs()
+    assert {job.id for job in migrated} == set(preview_ids)
+    assert all(job.execution_scope is JobExecutionScope.PREVIEW for job in migrated)
+    assert all(job.preview_seconds == 300.0 for job in migrated)
+    assert all(job.state is JobState.NEEDS_REVIEW for job in migrated)
+    _stabilize(config, repo, video, now=now)
+    summary = scan(config, repo, now=now, probe=_FakeProbe())
+    later = scan(config, repo, now=now + timedelta(seconds=1), probe=_FakeProbe())
+    jobs = repo.list_jobs()
+    repo.close()
+    assert summary.enqueued == 1
+    assert later.enqueued == 0
+    assert later.already_queued == 1
+    assert {job.id for job in jobs if not job.is_library_job()} == set(preview_ids)
+    assert len(_full_jobs(jobs)) == 1
 
 
 def test_daemon_command_starts_help_and_worker_remains(

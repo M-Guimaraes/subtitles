@@ -34,6 +34,7 @@ __all__ = [
     "EXIT_CODE_BY_ERROR",
     "FINGERPRINT_SAMPLE_BYTES",
     "HEARTBEAT_EVENT_CODE",
+    "LIBRARY_SCAN_KNOWN_STATES",
     "MANIFEST_SCHEMA_VERSION",
     "PIPELINE_STAGE_ORDER",
     "PORTUGUESE",
@@ -59,6 +60,7 @@ __all__ = [
     "ExitCode",
     "JobClaim",
     "JobEvent",
+    "JobExecutionScope",
     "JobManifest",
     "JobMetrics",
     "JobRecord",
@@ -98,6 +100,7 @@ __all__ = [
     "Word",
     "canonical_json",
     "exit_code_for",
+    "infer_execution_scope",
     "stable_digest",
     "stable_unit_id",
 ]
@@ -121,7 +124,7 @@ FINGERPRINT_SAMPLE_BYTES = 1 << 20
 
 CHECKPOINT_SCHEMA_VERSION = 1
 MANIFEST_SCHEMA_VERSION = 1
-DB_SCHEMA_VERSION = 1
+DB_SCHEMA_VERSION = 2
 TRANSLATION_NORMALIZER_VERSION = 1
 """Bumping this invalidates every cached translation."""
 
@@ -305,6 +308,44 @@ class JobState(StrEnum):
     SKIPPED = "skipped"
     FAILED = "failed"
     CANCELLED = "cancelled"
+
+
+class JobExecutionScope(StrEnum):
+    """Persistent execution identity: preview never satisfies the library.
+
+    ``full`` is automatic or unattended processing intended to produce
+    ``<stem>.pt-BR.srt``. ``preview`` is a manual ``--preview-seconds`` run
+    that writes ``.preview.srt`` only.
+    """
+
+    FULL = "full"
+    PREVIEW = "preview"
+
+
+def infer_execution_scope(
+    *,
+    stored: JobExecutionScope | str | None = None,
+    preview_seconds: Seconds | None = None,
+) -> JobExecutionScope:
+    """Resolve scope for new jobs and for rows from older databases.
+
+    An explicit stored value wins. Otherwise a non-null ``preview_seconds``
+    means preview (legacy SQLite rows). Scanner jobs have neither.
+    """
+    if stored is not None and stored != "":
+        return stored if isinstance(stored, JobExecutionScope) else JobExecutionScope(stored)
+    if preview_seconds is not None:
+        return JobExecutionScope.PREVIEW
+    return JobExecutionScope.FULL
+
+
+LIBRARY_SCAN_KNOWN_STATES: frozenset[JobState] = frozenset(JobState)
+"""States of a *full* job that mean the scanner must not enqueue another.
+
+Preview jobs are ignored regardless of state. Full jobs in queued, running,
+retry_wait, needs_review, ready_to_publish, completed, skipped, failed or
+cancelled all count: restart and retry reuse that row instead of duplicating.
+"""
 
 
 TERMINAL_JOB_STATES: frozenset[JobState] = frozenset(
@@ -893,6 +934,23 @@ class JobRecord:
     preview_seconds: Seconds | None = None
     preview_offset_seconds: Seconds | None = None
     approved_at: datetime | None = None
+    execution_scope: JobExecutionScope | None = None
+
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self,
+            "execution_scope",
+            infer_execution_scope(
+                stored=self.execution_scope, preview_seconds=self.preview_seconds
+            ),
+        )
+
+    def is_library_job(self) -> bool:
+        """True when this job is the scanner's library-satisfying identity."""
+        return (
+            infer_execution_scope(stored=self.execution_scope, preview_seconds=self.preview_seconds)
+            is JobExecutionScope.FULL
+        )
 
 
 @dataclass(frozen=True, slots=True)

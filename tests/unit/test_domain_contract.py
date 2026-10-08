@@ -9,12 +9,15 @@ import pytest
 
 from nas_subtitles.domain import (
     EXIT_CODE_BY_ERROR,
+    LIBRARY_SCAN_KNOWN_STATES,
     PIPELINE_STAGE_ORDER,
     RETRYABLE_ERROR_CODES,
     STRUCTURAL_FLAG_CODES,
     AudioChunkSpec,
     ErrorCode,
     ExitCode,
+    JobExecutionScope,
+    JobState,
     MediaFingerprint,
     PipelineStage,
     QualityFlag,
@@ -24,6 +27,7 @@ from nas_subtitles.domain import (
     SubtitleCue,
     Word,
     exit_code_for,
+    infer_execution_scope,
     stable_digest,
     stable_unit_id,
 )
@@ -164,6 +168,13 @@ def test_structural_flags_block_publication_and_advisories_only_review() -> None
     )
     assert structural.blocks_publication
     assert QualityFlagCode.CUE_OVERLAP in STRUCTURAL_FLAG_CODES
+
+
+def test_execution_scope_treats_legacy_preview_seconds_as_preview() -> None:
+    assert infer_execution_scope(preview_seconds=300.0) is JobExecutionScope.PREVIEW
+    assert infer_execution_scope() is JobExecutionScope.FULL
+    assert infer_execution_scope(stored="full", preview_seconds=300.0) is JobExecutionScope.FULL
+    assert frozenset(JobState) == LIBRARY_SCAN_KNOWN_STATES
 
 
 def test_cue_reading_speed_uses_visible_characters() -> None:

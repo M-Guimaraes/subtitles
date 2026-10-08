@@ -26,6 +26,7 @@ from .domain import (
     EventLevel,
     JobClaim,
     JobEvent,
+    JobExecutionScope,
     JobMetrics,
     JobRecord,
     JobState,
@@ -40,6 +41,7 @@ from .domain import (
     Seconds,
     TranslationCacheEntry,
     canonical_json,
+    infer_execution_scope,
 )
 from .logging_setup import event_payload
 from .states import ensure_transition
@@ -147,34 +149,37 @@ class SqliteJobRepository:
         now = datetime.now(tz=UTC)
         fingerprint_json = _fingerprint_json(fingerprint)
         job_id = str(uuid.uuid4())
+        scope = infer_execution_scope(preview_seconds=preview_seconds)
         with self._transaction(immediate=True):
-            existing = (
-                self._connection_or_raise()
-                .execute(
-                    """
-                SELECT * FROM jobs
-                WHERE root_id = ? AND relative_path = ? AND fingerprint = ?
-                      AND pipeline_config_hash = ?
-                """,
-                    (
-                        fingerprint.root_id,
-                        fingerprint.relative_path,
-                        fingerprint_json,
-                        pipeline_config_hash,
-                    ),
+            if scope is JobExecutionScope.FULL:
+                existing = (
+                    self._connection_or_raise()
+                    .execute(
+                        """
+                    SELECT * FROM jobs
+                    WHERE root_id = ? AND relative_path = ? AND fingerprint = ?
+                          AND pipeline_config_hash = ? AND execution_scope = ?
+                    """,
+                        (
+                            fingerprint.root_id,
+                            fingerprint.relative_path,
+                            fingerprint_json,
+                            pipeline_config_hash,
+                            str(scope),
+                        ),
+                    )
+                    .fetchone()
                 )
-                .fetchone()
-            )
-            if existing is not None:
-                return _job_from_row(existing)
+                if existing is not None:
+                    return _job_from_row(existing)
             self._connection_or_raise().execute(
                 """
                 INSERT INTO jobs (
                     id, root_id, relative_path, fingerprint, pipeline_config_hash,
                     state, current_stage, priority, attempt_count, created_at, updated_at,
                     source_language_override, audio_stream_index_override,
-                    preview_seconds, preview_offset_seconds
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?)
+                    preview_seconds, preview_offset_seconds, execution_scope
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     job_id,
@@ -191,6 +196,7 @@ class SqliteJobRepository:
                     audio_stream_index_override,
                     preview_seconds,
                     preview_offset_seconds,
+                    str(scope),
                 ),
             )
         job = self.get_job(job_id)
@@ -758,7 +764,17 @@ def _job_from_row(row: sqlite3.Row) -> JobRecord:
         preview_seconds=row["preview_seconds"],
         preview_offset_seconds=row["preview_offset_seconds"],
         approved_at=_optional_datetime(row["approved_at"]),
+        execution_scope=_execution_scope_from_row(row),
     )
+
+
+def _execution_scope_from_row(row: sqlite3.Row) -> JobExecutionScope:
+    stored: str | None
+    try:
+        stored = row["execution_scope"]
+    except IndexError:
+        stored = None
+    return infer_execution_scope(stored=stored, preview_seconds=row["preview_seconds"])
 
 
 def _artifact_from_row(row: sqlite3.Row) -> ArtifactRecord:
