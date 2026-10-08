@@ -13,7 +13,8 @@ dependencies = [
     "faster-whisper",
     "argostranslate",
     "srt",
-    "torch==2.14.1+cpu",
+    "torch==2.14.1+cpu; sys_platform == 'linux'",
+    "torch==2.14.1; sys_platform == 'darwin'",
 ]
 
 [project.scripts]
@@ -94,4 +95,6 @@ url = "https://download.pytorch.org/whl/cpu"
 explicit = true
 
 [tool.uv.sources]
-torch = { index = "pytorch-cpu" }
+torch = [
+    { index = "pytorch-cpu", marker = "sys_platform == 'linux'" },
+]
