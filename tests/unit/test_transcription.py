@@ -217,3 +217,59 @@ def test_merge_never_drops_different_adjacent_tokens() -> None:
         Word(text="means", start_seconds=19.50, end_seconds=19.80, probability=0.20),
     )
     assert [word.text for word in merged] == ["that", "means"]
+
+
+def test_merge_drops_touching_duplicate_when_peripheral_punctuation_differs() -> None:
+    merged = _merge_words(
+        Word(
+            text="means",
+            start_seconds=19.64,
+            end_seconds=19.98,
+            probability=0.9985106587409973,
+        ),
+        Word(
+            text="means?",
+            start_seconds=19.98,
+            end_seconds=20.30,
+            probability=0.5405997037887573,
+        ),
+    )
+    assert [word.text for word in merged] == ["means"]
+    assert merged[0].probability == 0.9985106587409973
+    assert merged[0].start_seconds == 19.64
+    assert merged[0].end_seconds == 19.98
+
+
+def test_merge_treats_peripheral_punctuation_as_the_same_token() -> None:
+    hello = _merge_words(
+        Word(text="hello", start_seconds=1.00, end_seconds=1.20, probability=0.99),
+        Word(text="hello,", start_seconds=1.20, end_seconds=1.40, probability=0.50),
+    )
+    assert [word.text for word in hello] == ["hello"]
+    assert hello[0].probability == 0.99
+
+    no = _merge_words(
+        Word(text="No", start_seconds=2.00, end_seconds=2.20, probability=0.99),
+        Word(text="no!", start_seconds=2.20, end_seconds=2.40, probability=0.40),
+    )
+    assert [word.text for word in no] == ["No"]
+    assert no[0].probability == 0.99
+
+
+def test_merge_keeps_internal_characters_when_comparing_tokens() -> None:
+    merged = _merge_words(
+        Word(text="don't", start_seconds=3.00, end_seconds=3.20, probability=0.99),
+        Word(text="dont", start_seconds=3.20, end_seconds=3.40, probability=0.20),
+    )
+    assert [word.text for word in merged] == ["don't", "dont"]
+
+
+def test_merge_keeps_high_confidence_repetition_with_peripheral_punctuation() -> None:
+    merged = _merge_words(
+        Word(text="No", start_seconds=4.00, end_seconds=4.30, probability=0.94),
+        Word(text="no!", start_seconds=4.30, end_seconds=4.60, probability=0.91),
+    )
+    assert [(word.text, word.probability) for word in merged] == [
+        ("No", 0.94),
+        ("no!", 0.91),
+    ]

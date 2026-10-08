@@ -8,6 +8,7 @@ inside the stage: creating it does not run the transcription.
 from __future__ import annotations
 
 import json
+import string
 from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
@@ -420,7 +421,7 @@ def _is_low_confidence(probability: float | None) -> bool:
 
 
 def _normalize_token(text: str) -> str:
-    return text.strip().casefold()
+    return text.strip().casefold().strip(string.punctuation)
 
 
 def _segments_from_words(words: Sequence[Word]) -> tuple[TranscriptSegment, ...]:

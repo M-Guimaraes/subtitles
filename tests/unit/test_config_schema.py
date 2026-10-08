@@ -176,7 +176,7 @@ def test_transcribe_hash_includes_word_dedupe_version(
     before = config.stage_config_hash(PipelineStage.TRANSCRIBE)
     pipeline_before = config.pipeline_config_hash
     merge_before = config.stage_config_hash(PipelineStage.MERGE)
-    monkeypatch.setattr("nas_subtitles.config.TRANSCRIBE_WORD_DEDUPE_VERSION", 2)
+    monkeypatch.setattr("nas_subtitles.config.TRANSCRIBE_WORD_DEDUPE_VERSION", 3)
     assert config.stage_config_hash(PipelineStage.TRANSCRIBE) != before
     assert config.pipeline_config_hash != pipeline_before
     assert config.stage_config_hash(PipelineStage.MERGE) == merge_before

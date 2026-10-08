@@ -124,7 +124,7 @@ DB_SCHEMA_VERSION = 1
 TRANSLATION_NORMALIZER_VERSION = 1
 """Bumping this invalidates every cached translation."""
 
-TRANSCRIBE_WORD_DEDUPE_VERSION = 1
+TRANSCRIBE_WORD_DEDUPE_VERSION = 2
 """Bumping this invalidates transcription checkpoints after merge/dedupe changes."""
 
 HEARTBEAT_EVENT_CODE = "worker_heartbeat"
