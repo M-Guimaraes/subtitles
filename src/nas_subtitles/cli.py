@@ -35,6 +35,7 @@ from .domain import (
     JobRecord,
     JobState,
     NasSubtitlesError,
+    PublishMode,
     PublishOutcome,
     exit_code_for,
 )
@@ -152,7 +153,18 @@ def _doctor_checks(config: AppConfig) -> list[DoctorCheck]:
                 DoctorCheck(f"media_root:{root.root_id}", "fail", f"{root.path} is not readable")
             )
         else:
-            checks.append(DoctorCheck(f"media_root:{root.root_id}", "ok", str(root.path)))
+            writable = os.access(root.path, os.W_OK)
+            if config.publish_mode is PublishMode.SIDECAR and not writable:
+                checks.append(
+                    DoctorCheck(
+                        f"media_root:{root.root_id}",
+                        "fail",
+                        "sidecar publishing requires a writable media directory; "
+                        "the application still never modifies video files",
+                    )
+                )
+            else:
+                checks.append(DoctorCheck(f"media_root:{root.root_id}", "ok", str(root.path)))
 
     for name, path, writable in (
         ("state_dir", config.state_dir, True),
@@ -489,6 +501,14 @@ def scan(
         )
 
 
+def _run_daemon(config_path: Path, json_output: bool) -> None:
+    del json_output
+    config = _load(config_path)
+    repo = repository.open_repository(config)
+    runner = worker.Worker(config, repo, owner=f"{platform.node()}:{os.getpid()}")
+    raise typer.Exit(runner.run())
+
+
 @app.command("worker")
 def worker_command(
     config_path: Path = _CONFIG_OPTION,
@@ -496,10 +516,17 @@ def worker_command(
 ) -> None:
     """Run the single daemon: periodic scan plus serial job processing."""
     with _handled(as_json=json_output):
-        config = _load(config_path)
-        repo = repository.open_repository(config)
-        runner = worker.Worker(config, repo, owner=f"{platform.node()}:{os.getpid()}")
-        raise typer.Exit(runner.run())
+        _run_daemon(config_path, json_output)
+
+
+@app.command("daemon")
+def daemon_command(
+    config_path: Path = _CONFIG_OPTION,
+    json_output: bool = _JSON_OPTION,
+) -> None:
+    """Long-lived automatic processing service (same process as ``worker``)."""
+    with _handled(as_json=json_output):
+        _run_daemon(config_path, json_output)
 
 
 @app.command()

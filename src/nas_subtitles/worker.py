@@ -8,6 +8,7 @@ looks alive.
 
 from __future__ import annotations
 
+import logging
 import re
 import shutil
 import signal
@@ -29,8 +30,11 @@ from .domain import (
     JobRepository,
     JobState,
     NasSubtitlesError,
+    PublishMode,
 )
+from .logging_setup import log_event
 from .models import MODEL_MANIFEST_FILENAME
+from .output import publish_job
 from .pipeline import StageContext, build_context, run_job
 from .repository import StateDirLock, open_repository
 from .states import retry_delay_seconds, should_retry
@@ -42,6 +46,8 @@ __all__ = [
     "cleanup_work_dir",
     "state_lock",
 ]
+
+_LOG = logging.getLogger(__name__)
 
 _JOB_ID_RE = re.compile(
     r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
@@ -81,10 +87,21 @@ class Worker:
         """Loop over scan and queue until stopped; returns a process exit code."""
         with state_lock(self.config):
             self._install_signal_handlers()
+            self.recover_interrupted_jobs()
             self._start_heartbeat()
             try:
                 while not self._stop.is_set():
-                    scan(self.config, self.repository)
+                    try:
+                        scan(self.config, self.repository)
+                    except NasSubtitlesError as exc:
+                        if exc.code is ErrorCode.INTERRUPTED:
+                            return int(ExitCode.SUCCESS)
+                        log_event(
+                            _LOG,
+                            "scan failed",
+                            error_code=exc.code,
+                            level=logging.ERROR,
+                        )
                     processed = self.run_once()
                     if once:
                         return int(ExitCode.SUCCESS)
@@ -98,24 +115,74 @@ class Worker:
                 self._stop.set()
         return int(ExitCode.SUCCESS)
 
+    def recover_interrupted_jobs(self) -> int:
+        """Re-queue jobs left ``running`` after a crash so they are not stuck."""
+        recovered = 0
+        for job in self.repository.list_jobs(state=JobState.RUNNING, limit=10_000):
+            self.repository.transition(
+                job_id=job.id,
+                state=JobState.QUEUED,
+                error_code=ErrorCode.INTERRUPTED,
+                error_detail="recovered after restart",
+            )
+            log_event(_LOG, "job recovered after restart", job_id=job.id)
+            recovered += 1
+        return recovered
+
     def run_once(self) -> bool:
         """Claim and process at most one job. ``False`` when the queue is empty."""
         claim = self.repository.claim_next_job(
             owner=self.owner, lease_seconds=self.config.worker.stale_lease_seconds
         )
         if claim is None:
-            return False
+            return self._publish_next_ready()
         job = claim.job
+        log_event(_LOG, "job started", job_id=job.id)
         try:
             if self._context_factory is not None:
                 context = self._context_factory(self.config, self.repository, job, self._stop)
             else:
                 context = build_context(self.config, self.repository, job, stop_event=self._stop)
             result = run_job(context)
+            if result.state is JobState.FAILED:
+                log_event(
+                    _LOG,
+                    "job failed",
+                    job_id=result.job_id,
+                    level=logging.ERROR,
+                )
             return result.job_id == job.id
         except NasSubtitlesError as exc:
             self._handle_failure(job.id, exc)
+            log_event(_LOG, "job failed", job_id=job.id, error_code=exc.code, level=logging.ERROR)
             return True
+        except Exception as exc:
+            wrapped = NasSubtitlesError(str(exc), code=ErrorCode.INVALID_MEDIA)
+            self._handle_failure(job.id, wrapped)
+            log_event(
+                _LOG,
+                "job failed",
+                job_id=job.id,
+                error_code=ErrorCode.INVALID_MEDIA,
+                level=logging.ERROR,
+            )
+            return True
+
+    def _publish_next_ready(self) -> bool:
+        """Finish leftover ``ready_to_publish`` jobs when sidecar mode is enabled."""
+        if self.config.publish_mode is not PublishMode.SIDECAR:
+            return False
+        ready = self.repository.list_jobs(state=JobState.READY_TO_PUBLISH, limit=1)
+        if not ready:
+            return False
+        job = ready[0]
+        log_event(_LOG, "job started", job_id=job.id)
+        try:
+            publish_job(self.config, self.repository, job)
+        except NasSubtitlesError as exc:
+            self._handle_failure(job.id, exc)
+            log_event(_LOG, "job failed", job_id=job.id, error_code=exc.code, level=logging.ERROR)
+        return True
 
     def request_stop(self) -> None:
         """Called from the SIGTERM handler; aborts the in-flight checkpoint."""

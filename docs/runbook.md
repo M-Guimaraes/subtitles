@@ -132,12 +132,69 @@ docker compose -f compose.yaml -f compose.sidecar.yaml run --rm subtitles \
 Both conditions are required: the config value **and** the override. Either
 one alone will not write beside the media.
 
-## 9. Run continuously
+## 9. Local validation of automatic processing
+
+Do this on the development machine before any NAS deploy. Use a disposable
+copy of media, not the only copy of a title.
+
+1. Point Compose at a local library (example):
+
+   ```bash
+   MEDIA_HOST_PATH=/Users/marceloguimaraes/Documents/Subtitles
+   ```
+
+   The container still sees that tree as `/media`. In `config/config.yaml` set
+   `media_roots` to the matching **container** paths (for a single bind that is
+   `/media`). Do not wipe `data/state/jobs.sqlite3` unless you intend to drop
+   the queue.
+
+2. For a short local wait, temporarily set `scan_interval_seconds`,
+   `stability_window_seconds` and `minimum_file_age_seconds` to values you are
+   willing to wait (for example 5 / 5 / 0). Restore the documented defaults
+   afterwards.
+
+3. Keep `publish_mode: staging` until a preview looks acceptable, then set
+   `publish_mode: sidecar` and start the daemon with a writable media mount:
+
+   ```bash
+   docker compose -f compose.yaml -f compose.offline.yaml -f compose.sidecar.yaml up -d
+   ```
+
+   Equivalent without Docker (from a venv with models already installed):
+
+   ```bash
+   uv run nas-subs daemon --config /absolute/path/to/config/config.yaml
+   ```
+
+4. Copy a completed supported video into the configured library with **no**
+   `*.pt-BR.srt` beside it. The first reconciliation should log `media
+   discovered` / `media waiting for stability`. After size and mtime stay
+   unchanged for `stability_window_seconds`, the file is queued, the existing
+   pipeline runs, and `<stem>.pt-BR.srt` appears next to the video.
+
+5. Restart the daemon (`docker compose restart subtitles` or interrupt and
+   start `nas-subs daemon` again). The same file must not get a second job or
+   a second sidecar.
+
+6. Leave the sidecar in place and wait for another scan. Generation must be
+   skipped (`existing target subtitle found` / `media skipped`). The existing
+   SRT bytes must not change.
+
+7. A file that fails processing must not stop later files in the same queue.
+
+The media bind is read-only unless `compose.sidecar.yaml` is included. Sidecar
+mode also needs write permission on the directories that will receive
+subtitles; the process still never modifies the video file itself.
+
+## 10. Run continuously
 
 ```bash
 docker compose -f compose.yaml -f compose.offline.yaml up -d
 docker compose logs -f subtitles
 ```
+
+For zero-touch sidecar publishing, add `compose.sidecar.yaml` and set
+`publish_mode: sidecar` as in section 9.
 
 Test a restart in the middle of a job and confirm it resumes without redoing
 valid chunks. To start on boot, add one line to your existing `nas-start`

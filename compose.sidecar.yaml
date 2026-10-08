@@ -1,14 +1,20 @@
 # Sidecar override: replaces the read-only /media bind with read-write, so
 # the SRT can be written next to the video.
 #
+# Production daemon (zero-touch sidecar publishing):
+#   docker compose -f compose.yaml -f compose.offline.yaml -f compose.sidecar.yaml up -d
+#
 # Two things must be true before this is used:
 #   1. config.yaml sets `publish_mode: sidecar`; the application refuses to
 #      write beside the media otherwise, override or not.
-#   2. the pilot episode has been reviewed in staging.
+#   2. the container user (APP_UID/APP_GID) can create files in the media
+#      directories that should receive sidecars. Do not chmod or chown the
+#      whole library; grant write only where subtitles will be published.
 #
-# Publication still never overwrites: an existing target name becomes an
-# output_conflict. Write permission is only needed on the directories that
-# actually receive a subtitle; do not chmod or chown the library.
+# The application still never remuxes, re-encodes, renames or deletes video.
+# Publication never overwrites: an existing target name becomes an
+# output_conflict. Temporary files used for atomic publish live next to the
+# target and are removed after the exclusive hard-link succeeds or fails.
 services:
   subtitles:
     volumes:

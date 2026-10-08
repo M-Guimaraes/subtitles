@@ -22,12 +22,13 @@ flowchart TD
   render --> validate[validate]
   validate --> staging[SRT and manifest in output]
   staging --> review{Gates}
-  review -->|structurally valid, no flags| done[ready_to_publish in staging]
-  review -->|soft flags| needs[needs_review]
+  review -->|staging, structurally valid| ready[ready_to_publish in staging]
+  review -->|structural errors| needs[needs_review]
+  review -->|sidecar mode, no structural errors| autosidecar[atomic sidecar publish]
   needs --> approve[jobs approve]
-  approve --> ready[ready_to_publish]
-  ready --> publish[publish without re-transcribing]
+  approve --> publish[publish without re-transcribing]
   publish --> sidecar[sidecar only when publish_mode is sidecar]
+  autosidecar --> sidecar
 ```
 
 ## Modules
@@ -123,6 +124,12 @@ clobber. The fingerprint and any existing subtitle are re-checked
 immediately before publishing. If the process dies between creating the file
 and committing to the database, reconciliation compares checksums; divergent
 content is a conflict.
+
+When `publish_mode` is `sidecar`, the worker publishes automatically after a
+job that has no structural errors. Staging and `.preview` outputs are
+unchanged. An existing canonical `.pt-BR.srt` is never overwritten (`skip`
+policy): `EEXIST` from `os.link` is an `output_conflict`. The daemon
+re-queues jobs left `running` after a crash so they cannot stay stuck.
 
 Manifests stay in `state_dir` and staging. They are never written next to a
 video.

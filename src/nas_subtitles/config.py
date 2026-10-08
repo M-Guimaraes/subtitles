@@ -32,6 +32,7 @@ from .domain import (
     TRANSCRIBE_WORD_DEDUPE_VERSION,
     TRANSLATION_NORMALIZER_VERSION,
     ConfigurationError,
+    ExistingSubtitlePolicy,
     PipelineStage,
     PublishMode,
     stable_digest,
@@ -235,6 +236,7 @@ class AppConfig(BaseModel):
     models_dir: Path
     output_dir: Path
     publish_mode: PublishMode = PublishMode.STAGING
+    existing_subtitle_policy: ExistingSubtitlePolicy = ExistingSubtitlePolicy.SKIP
     target_language: Literal["pt-BR"] = "pt-BR"
     scan_interval_seconds: int = Field(default=600, ge=1)
     stability_window_seconds: int = Field(default=600, ge=0)
@@ -408,6 +410,7 @@ class AppConfig(BaseModel):
             case PipelineStage.PUBLISH:
                 return {
                     "publish_mode": str(self.publish_mode),
+                    "existing_subtitle_policy": str(self.existing_subtitle_policy),
                     "target_language": self.target_language,
                 }
             case _:

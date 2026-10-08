@@ -7,6 +7,7 @@ never creates a missing media root and never writes inside the library.
 from __future__ import annotations
 
 import hashlib
+import logging
 import os
 import re
 from collections.abc import Iterator
@@ -22,8 +23,10 @@ from .domain import (
     VIDEO_EXTENSIONS,
     ErrorCode,
     ExistingSubtitle,
+    ExistingSubtitlePolicy,
     JobRecord,
     JobRepository,
+    JobState,
     MediaFingerprint,
     NasSubtitlesError,
     ProbeResult,
@@ -31,25 +34,29 @@ from .domain import (
     SubtitleOrigin,
 )
 from .language import subtitle_suffix_language
-from .logging_setup import path_token
+from .logging_setup import log_event, path_token
 from .media import FfprobeMediaProbe, select_audio_stream
 
 __all__ = [
     "ScanSummary",
+    "canonical_target_sidecar",
     "compute_fingerprint",
     "enqueue_path",
     "find_existing_subtitles",
     "has_portuguese_subtitle",
+    "has_target_sidecar",
     "is_candidate_name",
     "is_stable",
+    "is_temporary_name",
     "iter_candidate_files",
     "observe",
     "resolve_explicit_path",
     "scan",
 ]
 
+_LOG = logging.getLogger(__name__)
 _SKIP_DIR_NAMES = frozenset({"download", "incomplete", "downloads"})
-_TEMPORARY_SUFFIXES = frozenset({".part", ".tmp", ".temp", ".crdownload"})
+_TEMPORARY_SUFFIXES = frozenset({".part", ".partial", ".tmp", ".temp", ".crdownload", ".!qb"})
 _SUBTITLE_EXTENSIONS = frozenset({".srt", ".vtt", ".ass"})
 _TOKEN_SPLIT = re.compile(r"[^a-z0-9]+")
 
@@ -65,20 +72,30 @@ class ScanSummary:
     skipped_existing_subtitle: int = 0
     skipped_unreadable: int = 0
     already_queued: int = 0
+    skipped_temporary: int = 0
+    skipped_unsupported: int = 0
     enqueued_paths: tuple[str, ...] = ()
+
+
+def is_temporary_name(path: Path) -> bool:
+    """True for known partial/download suffixes that must never become jobs."""
+    suffixes = [part.lower() for part in path.suffixes]
+    if not suffixes:
+        return False
+    return suffixes[-1] in _TEMPORARY_SUFFIXES
 
 
 def is_candidate_name(path: Path) -> bool:
     """Extension and name filters only: no stat, no ffprobe.
 
-    Rejects non-video extensions (case-insensitively), ``.part`` files,
-    anything under a download/incomplete directory, and files carrying
+    Rejects non-video extensions (case-insensitively), temporary/partial
+    files, anything under a download/incomplete directory, and files carrying
     ``sample`` as a whole token.
     """
     suffixes = [part.lower() for part in path.suffixes]
     if not suffixes:
         return False
-    if suffixes[-1] in _TEMPORARY_SUFFIXES:
+    if is_temporary_name(path):
         return False
     if path.suffix.lower() not in VIDEO_EXTENSIONS:
         return False
@@ -166,6 +183,20 @@ def observe(
     first_seen = now
     if not changed and previous is not None:
         first_seen = previous.first_stable_seen_at or now
+    if previous is None:
+        log_event(
+            _LOG,
+            "media discovered",
+            root_id=root.root_id,
+            path_token=path_token(path),
+        )
+    if previous is None or changed:
+        log_event(
+            _LOG,
+            "media waiting for stability",
+            root_id=root.root_id,
+            path_token=path_token(path),
+        )
     observation = ScanObservation(
         root_id=root.root_id,
         relative_path=relative,
@@ -273,6 +304,17 @@ def has_portuguese_subtitle(subtitles: tuple[ExistingSubtitle, ...]) -> bool:
     return any(item.satisfies_target for item in subtitles)
 
 
+def canonical_target_sidecar(path: Path, target_language: str) -> Path:
+    """``<stem>.<logical-target-language>.srt`` beside the video, never a backend code."""
+    return path.with_suffix(f".{target_language}.srt")
+
+
+def has_target_sidecar(path: Path, target_language: str) -> bool:
+    """Whether the canonical generated sidecar for ``target_language`` already exists."""
+    sidecar = canonical_target_sidecar(path, target_language)
+    return sidecar.is_file() and not sidecar.is_symlink()
+
+
 def scan(
     config: AppConfig,
     repository: JobRepository,
@@ -299,9 +341,14 @@ def scan(
     skipped_existing = 0
     skipped_unreadable = 0
     already_queued = 0
+    skipped_temporary = 0
+    skipped_unsupported = 0
     enqueued_paths: list[str] = []
 
     for root in config.roots:
+        skipped_temporary, skipped_unsupported = _count_ignored_names(
+            root, skipped_temporary, skipped_unsupported
+        )
         for path in iter_candidate_files(config, root):
             examined += 1
             try:
@@ -325,21 +372,76 @@ def scan(
             except NasSubtitlesError:
                 skipped_unreadable += 1
                 continue
-            existing = find_existing_subtitles(path=path, probe_result=probe_result)
-            if has_portuguese_subtitle(existing):
+            skip_reason = _existing_subtitle_skip_reason(config, path, probe_result)
+            queued_already = _already_queued(repository, fingerprint, config.pipeline_config_hash)
+            if skip_reason is not None:
                 skipped_existing += 1
+                if not queued_already:
+                    log_event(
+                        _LOG,
+                        "media became stable",
+                        root_id=root.root_id,
+                        path_token=path_token(path),
+                    )
+                    log_event(
+                        _LOG,
+                        "existing target subtitle found",
+                        root_id=root.root_id,
+                        path_token=path_token(path),
+                        reason=skip_reason,
+                    )
+                    log_event(
+                        _LOG,
+                        "media skipped",
+                        root_id=root.root_id,
+                        path_token=path_token(path),
+                        reason=skip_reason,
+                    )
+                    if not dry_run:
+                        skipped_job = repository.enqueue(
+                            fingerprint=fingerprint,
+                            pipeline_config_hash=config.pipeline_config_hash,
+                        )
+                        if skipped_job.state is JobState.QUEUED:
+                            repository.transition(
+                                job_id=skipped_job.id,
+                                state=JobState.SKIPPED,
+                                error_detail=skip_reason,
+                            )
                 continue
-            if _already_queued(repository, fingerprint, config.pipeline_config_hash):
+            if queued_already:
                 already_queued += 1
                 continue
+            log_event(
+                _LOG,
+                "media became stable",
+                root_id=root.root_id,
+                path_token=path_token(path),
+            )
             if not dry_run:
-                repository.enqueue(
+                job = repository.enqueue(
                     fingerprint=fingerprint,
                     pipeline_config_hash=config.pipeline_config_hash,
+                )
+                log_event(
+                    _LOG,
+                    "job queued",
+                    job_id=job.id,
+                    root_id=root.root_id,
+                    path_token=path_token(path),
                 )
             enqueued += 1
             enqueued_paths.append(root.relative_path_for(path))
 
+    log_event(
+        _LOG,
+        "scan complete",
+        examined=examined,
+        enqueued=enqueued,
+        skipped_unstable=skipped_unstable,
+        skipped_existing_subtitle=skipped_existing,
+        already_queued=already_queued,
+    )
     return ScanSummary(
         examined=examined,
         enqueued=enqueued,
@@ -348,6 +450,8 @@ def scan(
         skipped_existing_subtitle=skipped_existing,
         skipped_unreadable=skipped_unreadable,
         already_queued=already_queued,
+        skipped_temporary=skipped_temporary,
+        skipped_unsupported=skipped_unsupported,
         enqueued_paths=tuple(enqueued_paths),
     )
 
@@ -389,9 +493,23 @@ def enqueue_path(
     inspector = probe or FfprobeMediaProbe()
     probe_result = inspector.probe(resolved)
     stream = select_audio_stream(probe_result, override_index=audio_stream_index)
-    existing = find_existing_subtitles(path=resolved, probe_result=probe_result)
-    if has_portuguese_subtitle(existing):
-        return None, "existing portuguese subtitle"
+    skip_reason = _existing_subtitle_skip_reason(config, resolved, probe_result)
+    if skip_reason is not None:
+        log_event(
+            _LOG,
+            "existing target subtitle found",
+            root_id=root.root_id,
+            path_token=path_token(resolved),
+            reason=skip_reason,
+        )
+        log_event(
+            _LOG,
+            "media skipped",
+            root_id=root.root_id,
+            path_token=path_token(resolved),
+            reason=skip_reason,
+        )
+        return None, skip_reason
     fingerprint = compute_fingerprint(root=root, path=resolved, audio_stream_index=stream.index)
     job = repository.enqueue(
         fingerprint=fingerprint,
@@ -402,7 +520,71 @@ def enqueue_path(
         preview_seconds=preview_seconds,
         preview_offset_seconds=preview_offset_seconds,
     )
+    log_event(
+        _LOG,
+        "job queued",
+        job_id=job.id,
+        root_id=root.root_id,
+        path_token=path_token(resolved),
+    )
     return job, None
+
+
+def _existing_subtitle_skip_reason(
+    config: AppConfig, path: Path, probe_result: ProbeResult | None
+) -> str | None:
+    """Return a skip reason when policy forbids generating over an existing target."""
+    assert config.existing_subtitle_policy is ExistingSubtitlePolicy.SKIP
+    if has_target_sidecar(path, config.target_language):
+        return f"existing target sidecar ({config.target_language})"
+    existing = find_existing_subtitles(path=path, probe_result=probe_result)
+    if has_portuguese_subtitle(existing):
+        matching = next(item for item in existing if item.satisfies_target)
+        return matching.reason or "existing portuguese subtitle"
+    return None
+
+
+def _count_ignored_names(
+    root: MediaRoot, skipped_temporary: int, skipped_unsupported: int
+) -> tuple[int, int]:
+    """Count non-candidate files once per scan for observability, without enqueueing them."""
+    if not root.path.is_dir():
+        return skipped_temporary, skipped_unsupported
+    for dirpath, dirnames, filenames in os.walk(root.path, followlinks=False):
+        current = Path(dirpath)
+        if current.is_symlink():
+            dirnames[:] = []
+            continue
+        dirnames[:] = [
+            name
+            for name in dirnames
+            if name.lower() not in _SKIP_DIR_NAMES and not (current / name).is_symlink()
+        ]
+        for name in filenames:
+            candidate = current / name
+            if candidate.is_symlink() or is_candidate_name(candidate):
+                continue
+            if is_temporary_name(candidate):
+                skipped_temporary += 1
+                log_event(
+                    _LOG,
+                    "temporary file ignored",
+                    root_id=root.root_id,
+                    path_token=path_token(candidate),
+                    level=logging.DEBUG,
+                )
+            elif candidate.suffix.lower() in _SUBTITLE_EXTENSIONS:
+                skipped_unsupported += 1
+            else:
+                skipped_unsupported += 1
+                log_event(
+                    _LOG,
+                    "unsupported media ignored",
+                    root_id=root.root_id,
+                    path_token=path_token(candidate),
+                    level=logging.DEBUG,
+                )
+    return skipped_temporary, skipped_unsupported
 
 
 def _already_queued(

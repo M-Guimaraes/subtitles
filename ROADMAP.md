@@ -4,15 +4,15 @@ Coding agents must read this file before selecting work. Specs live in `docs/roa
 
 ## Active
 
-**001** — Automatic processing service (`docs/roadmap/001-auto-processing.md`) — **PLANNED**
+**002** — Language detection and selection (`docs/roadmap/002-language-intelligence.md`) — **PLANNED**
 
 ## Status
 
 | Item | Spec | Status |
 |---|---|---|
 | 000 ASR quality: conservative duplicate removal | `docs/roadmap/000-asr-quality-dedup.md` | **DONE** (`19fabc7`). Residual: English can still emit `means` + `means?` because `_normalize_token` does not strip punctuation. Preview cue: “Sabe o que isso significa?”. `means means` → translation is PARTIALLY met. |
-| 001 Automatic processing service | `docs/roadmap/001-auto-processing.md` | PLANNED (next) |
-| 002 Language detection and selection | `docs/roadmap/002-language-intelligence.md` | PLANNED |
+| 001 Automatic processing service | `docs/roadmap/001-auto-processing.md` | **DONE**. Daemon command, reconciliation scan, sidecar auto-publish under `publish_mode: sidecar`, restart recovery of `running` jobs, skip existing `.pt-BR.srt`. Default config remains `publish_mode: staging`. Residual: `stability_window_seconds` / `minimum_file_age_seconds` stay 600 in the example config (not the spec's illustrative 60); publication stays exclusive `os.link` (never overwrite). |
+| 002 Language detection and selection | `docs/roadmap/002-language-intelligence.md` | PLANNED (next) |
 | 003 Web dashboard | `docs/roadmap/003-web-dashboard.md` | PLANNED |
 | 004 Sonarr/Radarr webhooks | `docs/roadmap/004-sonarr-radarr-webhooks.md` | PLANNED |
 | 005 Multiple target languages | `docs/roadmap/005-multiple-target-languages.md` | PLANNED |

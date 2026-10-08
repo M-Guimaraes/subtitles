@@ -61,8 +61,15 @@ for dir in data/state data/work data/models data/output; do
     mkdir -p "$dir"
 done
 
+compose_files=(
+    -f "$PROJECT_DIR/compose.yaml"
+    -f "$PROJECT_DIR/compose.offline.yaml"
+)
+if grep -Eq '^publish_mode:[[:space:]]*sidecar[[:space:]]*$' "$PROJECT_DIR/config/config.yaml"; then
+    compose_files+=(-f "$PROJECT_DIR/compose.sidecar.yaml")
+fi
+
 exec docker compose \
     --project-directory "$PROJECT_DIR" \
-    -f "$PROJECT_DIR/compose.yaml" \
-    -f "$PROJECT_DIR/compose.offline.yaml" \
+    "${compose_files[@]}" \
     up -d

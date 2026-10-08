@@ -15,7 +15,7 @@ services:
     user: "${APP_UID:-1000}:${APP_GID:-1000}"
     init: true
     restart: unless-stopped
-    command: [nas-subs, worker, --config, /config/config.yaml]
+    command: [nas-subs, daemon, --config, /config/config.yaml]
     cpus: "2.0"
     mem_limit: 4g
     stop_grace_period: 60s

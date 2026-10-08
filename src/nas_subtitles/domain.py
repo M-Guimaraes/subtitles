@@ -55,6 +55,7 @@ __all__ = [
     "ErrorCode",
     "EventLevel",
     "ExistingSubtitle",
+    "ExistingSubtitlePolicy",
     "ExitCode",
     "JobClaim",
     "JobEvent",
@@ -339,6 +340,12 @@ PIPELINE_STAGE_ORDER: tuple[PipelineStage, ...] = (
 class PublishMode(StrEnum):
     STAGING = "staging"
     SIDECAR = "sidecar"
+
+
+class ExistingSubtitlePolicy(StrEnum):
+    """What automatic processing does when the canonical target sidecar exists."""
+
+    SKIP = "skip"
 
 
 class EventLevel(StrEnum):

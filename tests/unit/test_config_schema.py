@@ -7,11 +7,17 @@ from pathlib import Path
 import pytest
 
 from nas_subtitles.config import AppConfig, load_config, root_id_for
-from nas_subtitles.domain import ConfigurationError, PipelineStage, PublishMode
+from nas_subtitles.domain import (
+    ConfigurationError,
+    ExistingSubtitlePolicy,
+    PipelineStage,
+    PublishMode,
+)
 
 
 def test_example_config_matches_the_documented_defaults(config: AppConfig) -> None:
     assert config.publish_mode is PublishMode.STAGING
+    assert config.existing_subtitle_policy is ExistingSubtitlePolicy.SKIP
     assert config.target_language == "pt-BR"
     assert config.scan_interval_seconds == 600
     assert config.stability_window_seconds == 600
@@ -168,6 +174,26 @@ def test_every_stage_has_a_hash(config: AppConfig) -> None:
     hashes = {stage: config.stage_config_hash(stage) for stage in PipelineStage}
     assert len(hashes) == len(PipelineStage)
     assert all(len(value) == 64 for value in hashes.values())
+
+
+def test_scan_interval_must_be_positive(tmp_path: Path, config_path: Path) -> None:
+    broken = tmp_path / "scan.yaml"
+    text = config_path.read_text(encoding="utf-8").replace(
+        "scan_interval_seconds: 600", "scan_interval_seconds: 0"
+    )
+    broken.write_text(text, encoding="utf-8")
+    with pytest.raises(ConfigurationError, match="scan_interval_seconds"):
+        load_config(broken)
+
+
+def test_stability_window_must_not_be_negative(tmp_path: Path, config_path: Path) -> None:
+    broken = tmp_path / "stability.yaml"
+    text = config_path.read_text(encoding="utf-8").replace(
+        "stability_window_seconds: 600", "stability_window_seconds: -1"
+    )
+    broken.write_text(text, encoding="utf-8")
+    with pytest.raises(ConfigurationError, match="stability_window_seconds"):
+        load_config(broken)
 
 
 def test_transcribe_hash_includes_word_dedupe_version(

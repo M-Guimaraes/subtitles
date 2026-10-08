@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import contextlib
 import errno
+import logging
 import os
 import uuid
 from collections.abc import Sequence
@@ -32,7 +33,7 @@ from .domain import (
     SubtitleCue,
     canonical_json,
 )
-from .logging_setup import path_token
+from .logging_setup import log_event, path_token
 
 __all__ = [
     "PREVIEW_MARKER",
@@ -49,7 +50,7 @@ __all__ = [
 PREVIEW_MARKER = ".preview"
 """A preview is written to staging only and can never become a sidecar."""
 
-_TARGET_LANGUAGE_SUFFIX = "pt-BR"
+_LOG = logging.getLogger(__name__)
 _SRT_MODE = 0o644
 
 
@@ -89,14 +90,16 @@ class SrtSubtitleRenderer:
 def staging_path_for(config: AppConfig, job: JobRecord) -> Path:
     """``output_dir/<root_id>/<relative tree>/<stem>.pt-BR.srt``."""
     relative = Path(job.relative_path)
-    return config.output_dir / job.root_id / relative.with_suffix(f".{_TARGET_LANGUAGE_SUFFIX}.srt")
+    return config.output_dir / job.root_id / relative.with_suffix(f".{config.target_language}.srt")
 
 
 def sidecar_path_for(config: AppConfig, root: MediaRoot, relative_path: str) -> Path:
-    """``<stem>.pt-BR.srt`` beside the video; requires ``publish_mode: sidecar``."""
-    del config
+    """``<stem>.pt-BR.srt`` beside the video; requires ``publish_mode: sidecar``.
+
+    Uses the public target language, never an Argos backend code such as ``pb``.
+    """
     video = root.path / relative_path
-    return video.with_suffix(f".{_TARGET_LANGUAGE_SUFFIX}.srt")
+    return video.with_suffix(f".{config.target_language}.srt")
 
 
 def preview_path_for(config: AppConfig, job: JobRecord) -> Path:
@@ -183,6 +186,12 @@ def publish_exclusive(*, content: str, target: Path) -> PublishResult:
     finally:
         with contextlib.suppress(OSError):
             temporary.unlink()
+    log_event(
+        _LOG,
+        "sidecar published",
+        path_token=path_token(target),
+        target_name=target.name,
+    )
     return PublishResult(
         outcome=PublishOutcome.PUBLISHED,
         target_path=target,

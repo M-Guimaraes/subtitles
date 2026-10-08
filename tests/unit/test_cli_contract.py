@@ -25,6 +25,7 @@ DOCUMENTED_COMMANDS: tuple[tuple[str, ...], ...] = (
     ("enqueue",),
     ("scan",),
     ("worker",),
+    ("daemon",),
     ("jobs", "list"),
     ("jobs", "show"),
     ("jobs", "retry"),

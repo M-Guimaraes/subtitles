@@ -30,6 +30,8 @@ def test_sample_token_and_part_files_are_rejected() -> None:
     assert not is_candidate_name(Path("Show.sample.mkv"))
     assert is_candidate_name(Path("sampler.mkv"))
     assert not is_candidate_name(Path("Show.S01E01.mkv.part"))
+    assert not is_candidate_name(Path("Show.S01E01.mkv.partial"))
+    assert not is_candidate_name(Path("Show.S01E01.mkv.!qB"))
     assert not is_candidate_name(Path("download/Show.mkv"))
     assert not is_candidate_name(Path("Show.srt"))
 

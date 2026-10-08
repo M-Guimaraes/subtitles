@@ -13,6 +13,7 @@ work_dir: /work
 models_dir: /models
 output_dir: /output
 publish_mode: staging
+existing_subtitle_policy: skip
 target_language: pt-BR
 scan_interval_seconds: 600
 stability_window_seconds: 600

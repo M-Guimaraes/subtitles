@@ -8,6 +8,7 @@ before it.
 from __future__ import annotations
 
 import hashlib
+import logging
 from dataclasses import dataclass, replace
 from pathlib import Path
 from threading import Event
@@ -30,6 +31,7 @@ from .domain import (
     ModelKind,
     NasSubtitlesError,
     PipelineStage,
+    PublishMode,
     QualityReport,
     Seconds,
     SubtitleRenderer,
@@ -38,6 +40,7 @@ from .domain import (
     Translator,
 )
 from .language import decide_source_language, is_supported_source
+from .logging_setup import log_event
 from .media import (
     FfmpegAudioExtractor,
     FfprobeMediaProbe,
@@ -49,6 +52,7 @@ from .models import asr_model_path, read_model_manifest
 from .output import (
     SrtSubtitleRenderer,
     preview_path_for,
+    publish_job,
     staging_path_for,
     write_manifest,
 )
@@ -64,6 +68,8 @@ from .transcription import (
 from .translation import ArgosTranslator, build_translation_units, translate_with_cache
 
 __all__ = ["PipelineResult", "StageContext", "build_context", "run_job", "run_stage"]
+
+_LOG = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True, slots=True)
@@ -156,6 +162,12 @@ def run_job(
     existing = find_existing_subtitles(path=video, probe_result=probe_result)
     if has_portuguese_subtitle(existing) and job.preview_seconds is None:
         job = repo.transition(job_id=job.id, state=JobState.SKIPPED)
+        log_event(
+            _LOG,
+            "media skipped",
+            job_id=job.id,
+            reason="existing portuguese subtitle",
+        )
         return PipelineResult(
             job_id=job.id, state=job.state, last_stage=PipelineStage.PROBE, quality=QualityReport()
         )
@@ -351,6 +363,17 @@ def run_job(
         stage=PipelineStage.VALIDATE,
         output_path=destination,
     )
+    published = _maybe_publish_sidecar(
+        context,
+        job=job,
+        quality=quality,
+        cue_count=len(cues),
+        media_seconds=duration,
+    )
+    if published is not None:
+        log_event(_LOG, "job completed", job_id=published.job_id, state=str(published.state))
+        return published
+    log_event(_LOG, "job completed", job_id=job.id, state=str(job.state))
     return PipelineResult(
         job_id=job.id,
         state=job.state,
@@ -359,6 +382,65 @@ def run_job(
         output_path=destination,
         cue_count=len(cues),
         media_seconds=duration,
+    )
+
+
+def _maybe_publish_sidecar(
+    context: StageContext,
+    *,
+    job: JobRecord,
+    quality: QualityReport,
+    cue_count: int,
+    media_seconds: Seconds,
+) -> PipelineResult | None:
+    """Atomically publish next to the video when sidecar mode is on and gates allow it.
+
+    Staging and previews stay in ``output_dir``. Structural errors still block
+    publication. Advisory flags do not, so a running daemon can finish without
+    a manual ``nas-subs publish``.
+    """
+    config = context.config
+    if job.preview_seconds is not None:
+        return None
+    if config.publish_mode is not PublishMode.SIDECAR:
+        return None
+    if quality.blocks_publication:
+        return None
+    if job.state is JobState.NEEDS_REVIEW:
+        job = context.repository.transition(
+            job_id=job.id,
+            state=JobState.READY_TO_PUBLISH,
+            stage=PipelineStage.PUBLISH,
+        )
+    try:
+        result = publish_job(config, context.repository, job)
+    except NasSubtitlesError as exc:
+        if exc.code is ErrorCode.OUTPUT_CONFLICT:
+            updated = context.repository.transition(
+                job_id=job.id,
+                state=JobState.NEEDS_REVIEW,
+                error_code=ErrorCode.OUTPUT_CONFLICT,
+                error_detail=exc.message,
+            )
+            return PipelineResult(
+                job_id=updated.id,
+                state=updated.state,
+                last_stage=PipelineStage.PUBLISH,
+                quality=quality,
+                output_path=job.output_path,
+                cue_count=cue_count,
+                media_seconds=media_seconds,
+            )
+        raise
+    refreshed = context.repository.get_job(job.id) or job
+    return PipelineResult(
+        job_id=refreshed.id,
+        state=refreshed.state,
+        last_stage=PipelineStage.PUBLISH,
+        quality=quality,
+        output_path=result.target_path,
+        cue_count=cue_count,
+        media_seconds=media_seconds,
     )
 
 

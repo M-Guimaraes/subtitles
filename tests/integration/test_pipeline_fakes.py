@@ -14,16 +14,18 @@ from nas_subtitles.discovery import enqueue_path
 from nas_subtitles.domain import (
     AudioChunk,
     ChunkTranscript,
+    JobState,
     LanguageDecision,
     LanguageSource,
     ModelIdentity,
     ModelKind,
+    PublishMode,
     TranscriptSegment,
     TranslatedUnit,
     Word,
 )
 from nas_subtitles.media import FfmpegAudioExtractor, FfprobeMediaProbe
-from nas_subtitles.output import SrtSubtitleRenderer
+from nas_subtitles.output import SrtSubtitleRenderer, sidecar_path_for
 from nas_subtitles.pipeline import StageContext, run_job
 from nas_subtitles.repository import open_repository
 
@@ -85,8 +87,7 @@ class _FakeTranslator:
         )
 
 
-def test_fake_pipeline_writes_staging_srt(config: AppConfig, media_root: Path) -> None:
-    video = media_root / "episode.mkv"
+def _write_clip(video: Path) -> None:
     subprocess.run(
         [
             "ffmpeg",
@@ -110,6 +111,11 @@ def test_fake_pipeline_writes_staging_srt(config: AppConfig, media_root: Path) -
         capture_output=True,
         timeout=60,
     )
+
+
+def test_fake_pipeline_writes_staging_srt(config: AppConfig, media_root: Path) -> None:
+    video = media_root / "episode.mkv"
+    _write_clip(video)
     repo = open_repository(config)
     job, skipped = enqueue_path(config, repo, video, require_stability=False, source_language="en")
     assert skipped is None and job is not None
@@ -130,3 +136,56 @@ def test_fake_pipeline_writes_staging_srt(config: AppConfig, media_root: Path) -
     assert result.output_path.is_file()
     assert result.cue_count >= 1
     assert "ola" in result.output_path.read_text(encoding="utf-8").lower()
+    assert result.state is not JobState.COMPLETED
+    sidecar = sidecar_path_for(config, config.roots[0], "episode.mkv")
+    assert not sidecar.exists()
+
+
+def test_sidecar_mode_publishes_atomic_pt_br_next_to_media(
+    config: AppConfig, media_root: Path
+) -> None:
+    config = config.model_copy(update={"publish_mode": PublishMode.SIDECAR})
+    video = media_root / "Dexter.S03E01.mkv"
+    _write_clip(video)
+    original = video.read_bytes()
+    repo = open_repository(config)
+    job, skipped = enqueue_path(config, repo, video, require_stability=False, source_language="en")
+    assert skipped is None and job is not None
+    context = StageContext(
+        config=config,
+        repository=repo,
+        job=job,
+        probe=FfprobeMediaProbe(),
+        extractor=FfmpegAudioExtractor(),
+        transcriber=_FakeTranscriber(),
+        translator=_FakeTranslator(),
+        renderer=SrtSubtitleRenderer(),
+        stop_event=Event(),
+    )
+    result = run_job(context)
+    sidecar = sidecar_path_for(config, config.roots[0], job.relative_path)
+    refreshed = repo.get_job(job.id)
+    repo.close()
+    assert result.output_path == sidecar
+    assert sidecar.is_file()
+    assert sidecar.name == "Dexter.S03E01.pt-BR.srt"
+    assert "ola" in sidecar.read_text(encoding="utf-8").lower()
+    assert video.read_bytes() == original
+    assert refreshed is not None
+    assert refreshed.state is JobState.COMPLETED
+
+
+def test_sidecar_skip_policy_does_not_overwrite_during_processing(
+    config: AppConfig, media_root: Path
+) -> None:
+    config = config.model_copy(update={"publish_mode": PublishMode.SIDECAR})
+    video = media_root / "episode.mkv"
+    _write_clip(video)
+    sidecar = sidecar_path_for(config, config.roots[0], "episode.mkv")
+    sidecar.write_text("existing-cues\n", encoding="utf-8")
+    repo = open_repository(config)
+    _job, skipped = enqueue_path(config, repo, video, require_stability=False, source_language="en")
+    repo.close()
+    assert skipped is not None
+    assert "pt-BR" in skipped
+    assert sidecar.read_text(encoding="utf-8") == "existing-cues\n"

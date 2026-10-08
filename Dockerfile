@@ -57,4 +57,4 @@ USER $APP_UID:$APP_GID
 
 # No ENTRYPOINT: Compose passes the full `nas-subs ...` argv, and the
 # healthcheck runs `nas-subs health` directly.
-CMD ["nas-subs", "worker", "--config", "/config/config.yaml"]
+CMD ["nas-subs", "daemon", "--config", "/config/config.yaml"]

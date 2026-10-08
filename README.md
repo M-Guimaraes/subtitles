@@ -88,6 +88,7 @@ nas-subs process PATH        run one file ahead of the queue
 nas-subs enqueue PATH        add one file to the queue
 nas-subs scan                walk the roots and queue stable, unsubtitled videos
 nas-subs worker              the daemon: periodic scan plus serial processing
+nas-subs daemon              alias of worker; the Compose service entry point
 nas-subs jobs list|show|retry|cancel|approve
 nas-subs publish JOB_ID      publish an approved job without re-transcribing
 nas-subs benchmark PATH      measure throughput and memory on a short window
