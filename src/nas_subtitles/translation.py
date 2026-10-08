@@ -29,7 +29,7 @@ from .domain import (
     stable_unit_id,
 )
 from .language import normalize_language_tag
-from .models import configure_argos_environment, translation_package_path
+from .models import configure_argos_environment, configure_stanza_offline, translation_package_path
 
 __all__ = [
     "ArgosTranslator",
@@ -125,9 +125,11 @@ class ArgosTranslator:
         if self._loaded:
             return
         configure_argos_environment(self.config)
+        configure_stanza_offline()
         translation_package_path(self.config, source=ENGLISH, target=PORTUGUESE)
         import argostranslate.translate  # noqa: F401  # registers installed packages
 
+        configure_argos_environment(self.config)
         self._loaded = True
 
 

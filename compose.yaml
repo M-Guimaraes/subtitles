@@ -20,6 +20,8 @@ services:
     mem_limit: 4g
     stop_grace_period: 60s
     environment:
+      HOME: /models/home
+      XDG_CONFIG_HOME: /models/config
       OMP_NUM_THREADS: "2"
       OPENBLAS_NUM_THREADS: "2"
       HF_HUB_OFFLINE: "1"
