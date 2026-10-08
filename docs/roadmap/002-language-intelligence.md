@@ -1,6 +1,6 @@
 # 002 — Language Detection and Selection
 
-**Status:** PLANNED
+**Status:** DONE
 
 ## Goal
 

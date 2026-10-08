@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import contextlib
 import errno
+import json
 import logging
 import os
 import uuid
@@ -38,9 +39,11 @@ from .logging_setup import log_event, path_token
 __all__ = [
     "PREVIEW_MARKER",
     "SrtSubtitleRenderer",
+    "manifest_path_for",
     "preview_path_for",
     "publish_exclusive",
     "publish_job",
+    "read_manifest_payload",
     "sidecar_path_for",
     "staging_path_for",
     "supports_atomic_publish",
@@ -271,11 +274,28 @@ def publish_job(config: AppConfig, repository: JobRepository, job: JobRecord) ->
     return result
 
 
+def manifest_path_for(config: AppConfig, job_id: str) -> Path:
+    """Manifests live under ``state_dir``, never beside the video."""
+    return config.manifests_dir / f"{job_id}.json"
+
+
+def read_manifest_payload(config: AppConfig, job_id: str) -> dict[str, object] | None:
+    """Load a job manifest as JSON, or ``None`` when it has not been written."""
+    path = manifest_path_for(config, job_id)
+    if not path.is_file():
+        return None
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    return payload if isinstance(payload, dict) else None
+
+
 def write_manifest(config: AppConfig, manifest: JobManifest) -> Path:
     """Write the manifest under ``state_dir``, never beside the video."""
     config.manifests_dir.mkdir(parents=True, exist_ok=True)
-    path = config.manifests_dir / f"{manifest.job_id}.json"
-    payload = {
+    path = manifest_path_for(config, manifest.job_id)
+    payload: dict[str, object] = {
         "schema_version": manifest.schema_version,
         "job_id": manifest.job_id,
         "fingerprint": {
@@ -290,6 +310,27 @@ def write_manifest(config: AppConfig, manifest: JobManifest) -> Path:
         "pipeline_config_hash": manifest.pipeline_config_hash,
         "source_language": manifest.source_language,
         "target_language": manifest.target_language,
+        "selected_audio_stream_index": manifest.selected_audio_stream_index,
+        "stream_language": manifest.stream_language,
+        "stream_language_tag": manifest.stream_language_tag,
+        "detected_language": manifest.detected_language,
+        "detection_probability": manifest.detection_probability,
+        "source_language_source": (
+            str(manifest.source_language_source) if manifest.source_language_source else None
+        ),
+        "source_language_confident": manifest.source_language_confident,
+        "source_language_reason": manifest.source_language_reason,
+        "translation_executed": manifest.translation_executed,
+        "translation_engine_identity": manifest.translation_engine_identity,
+        "models": [
+            {
+                "kind": str(model.kind),
+                "name": model.name,
+                "version": model.version,
+                "identity": model.identity_token(),
+            }
+            for model in manifest.models
+        ],
         "subtitle_sha256": manifest.subtitle_sha256,
         "quality_flags": [str(flag.code) for flag in manifest.quality.flags],
     }

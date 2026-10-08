@@ -34,6 +34,7 @@ __all__ = [
     "EXIT_CODE_BY_ERROR",
     "FINGERPRINT_SAMPLE_BYTES",
     "HEARTBEAT_EVENT_CODE",
+    "LANGUAGE_DECISION_POLICY_VERSION",
     "LIBRARY_SCAN_KNOWN_STATES",
     "MANIFEST_SCHEMA_VERSION",
     "PIPELINE_STAGE_ORDER",
@@ -123,10 +124,13 @@ FINGERPRINT_SAMPLE_BYTES = 1 << 20
 """1 MiB is hashed from the head and 1 MiB from the tail of a media file."""
 
 CHECKPOINT_SCHEMA_VERSION = 1
-MANIFEST_SCHEMA_VERSION = 1
+MANIFEST_SCHEMA_VERSION = 2
 DB_SCHEMA_VERSION = 2
 TRANSLATION_NORMALIZER_VERSION = 1
 """Bumping this invalidates every cached translation."""
+
+LANGUAGE_DECISION_POLICY_VERSION = 1
+"""Bumping this invalidates jobs when the auto language policy changes."""
 
 TRANSCRIBE_WORD_DEDUPE_VERSION = 2
 """Bumping this invalidates transcription checkpoints after merge/dedupe changes."""
@@ -1002,6 +1006,16 @@ class JobManifest:
     pipeline_config_hash: str
     source_language: str | None
     target_language: str
+    selected_audio_stream_index: int | None = None
+    stream_language: str | None = None
+    stream_language_tag: str | None = None
+    detected_language: str | None = None
+    detection_probability: float | None = None
+    source_language_source: LanguageSource | None = None
+    source_language_confident: bool | None = None
+    source_language_reason: str = ""
+    translation_executed: bool | None = None
+    translation_engine_identity: str | None = None
     models: tuple[ModelIdentity, ...] = ()
     metrics: JobMetrics | None = None
     quality: QualityReport = field(default_factory=QualityReport)

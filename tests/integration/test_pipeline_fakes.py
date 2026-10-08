@@ -14,8 +14,10 @@ from nas_subtitles.discovery import enqueue_path
 from nas_subtitles.domain import (
     AudioChunk,
     ChunkTranscript,
+    ErrorCode,
     JobState,
     LanguageDecision,
+    LanguageSample,
     LanguageSource,
     ModelIdentity,
     ModelKind,
@@ -25,7 +27,7 @@ from nas_subtitles.domain import (
     Word,
 )
 from nas_subtitles.media import FfmpegAudioExtractor, FfprobeMediaProbe
-from nas_subtitles.output import SrtSubtitleRenderer, sidecar_path_for
+from nas_subtitles.output import SrtSubtitleRenderer, read_manifest_payload, sidecar_path_for
 from nas_subtitles.pipeline import StageContext, run_job
 from nas_subtitles.repository import open_repository
 
@@ -36,13 +38,35 @@ pytestmark = [
 
 
 class _FakeTranscriber:
+    def __init__(self, *, language: str = "en", probability: float = 0.95) -> None:
+        self.language = language
+        self.probability = probability
+        self.detect_calls = 0
+
     @property
     def model_identity(self) -> ModelIdentity:
         return ModelIdentity(kind=ModelKind.ASR, name="fake", path=Path("/models/fake"))
 
     def detect_language(self, samples):
-        del samples
-        return LanguageDecision(language="en", source=LanguageSource.OVERRIDE, confident=True)
+        self.detect_calls += 1
+        collected = tuple(
+            LanguageSample(
+                offset_seconds=chunk.spec.extract_start_seconds,
+                duration_seconds=chunk.spec.extract_duration_seconds,
+                language=self.language,
+                probability=self.probability,
+                has_speech=self.probability >= 0.15,
+            )
+            for chunk in samples
+        )
+        confident = self.probability >= 0.80
+        return LanguageDecision(
+            language=self.language if confident else None,
+            source=LanguageSource.DETECTION,
+            confident=confident,
+            probability=self.probability,
+            samples=collected,
+        )
 
     def transcribe(self, chunk: AudioChunk, *, language: str) -> ChunkTranscript:
         start = chunk.spec.owned_start_seconds
@@ -51,6 +75,7 @@ class _FakeTranscriber:
         return ChunkTranscript(
             chunk=chunk.spec,
             language=language,
+            language_probability=self.probability,
             model_identity=self.model_identity,
             segments=(
                 TranscriptSegment(
@@ -66,6 +91,9 @@ class _FakeTranscriber:
 
 
 class _FakeTranslator:
+    def __init__(self) -> None:
+        self.calls = 0
+
     @property
     def engine_identity(self) -> str:
         return "fake-translator"
@@ -74,6 +102,7 @@ class _FakeTranslator:
         return source_language == "en" and target_language.startswith("pt")
 
     def translate(self, units):
+        self.calls += 1
         return tuple(
             TranslatedUnit(
                 unit_id=unit.unit_id,
@@ -85,6 +114,20 @@ class _FakeTranslator:
             )
             for unit in units
         )
+
+
+def _context(config: AppConfig, repo, job, *, transcriber=None, translator=None) -> StageContext:
+    return StageContext(
+        config=config,
+        repository=repo,
+        job=job,
+        probe=FfprobeMediaProbe(),
+        extractor=FfmpegAudioExtractor(),
+        transcriber=transcriber or _FakeTranscriber(),
+        translator=translator or _FakeTranslator(),
+        renderer=SrtSubtitleRenderer(),
+        stop_event=Event(),
+    )
 
 
 def _write_clip(video: Path) -> None:
@@ -119,17 +162,7 @@ def test_fake_pipeline_writes_staging_srt(config: AppConfig, media_root: Path) -
     repo = open_repository(config)
     job, skipped = enqueue_path(config, repo, video, require_stability=False, source_language="en")
     assert skipped is None and job is not None
-    context = StageContext(
-        config=config,
-        repository=repo,
-        job=job,
-        probe=FfprobeMediaProbe(),
-        extractor=FfmpegAudioExtractor(),
-        transcriber=_FakeTranscriber(),
-        translator=_FakeTranslator(),
-        renderer=SrtSubtitleRenderer(),
-        stop_event=Event(),
-    )
+    context = _context(config, repo, job)
     result = run_job(context)
     repo.close()
     assert result.output_path is not None
@@ -151,17 +184,7 @@ def test_sidecar_mode_publishes_atomic_pt_br_next_to_media(
     repo = open_repository(config)
     job, skipped = enqueue_path(config, repo, video, require_stability=False, source_language="en")
     assert skipped is None and job is not None
-    context = StageContext(
-        config=config,
-        repository=repo,
-        job=job,
-        probe=FfprobeMediaProbe(),
-        extractor=FfmpegAudioExtractor(),
-        transcriber=_FakeTranscriber(),
-        translator=_FakeTranslator(),
-        renderer=SrtSubtitleRenderer(),
-        stop_event=Event(),
-    )
+    context = _context(config, repo, job)
     result = run_job(context)
     sidecar = sidecar_path_for(config, config.roots[0], job.relative_path)
     refreshed = repo.get_job(job.id)
@@ -189,3 +212,85 @@ def test_sidecar_skip_policy_does_not_overwrite_during_processing(
     assert skipped is not None
     assert "pt-BR" in skipped
     assert sidecar.read_text(encoding="utf-8") == "existing-cues\n"
+
+
+def test_auto_english_detection_persists_and_translates_to_pt_br(
+    config: AppConfig, media_root: Path
+) -> None:
+    video = media_root / "episode.mkv"
+    _write_clip(video)
+    repo = open_repository(config)
+    job, skipped = enqueue_path(config, repo, video, require_stability=False)
+    assert skipped is None and job is not None
+    transcriber = _FakeTranscriber(language="en", probability=0.93)
+    translator = _FakeTranslator()
+    result = run_job(_context(config, repo, job, transcriber=transcriber, translator=translator))
+    payload = read_manifest_payload(config, job.id)
+    repo.close()
+    assert transcriber.detect_calls == 1
+    assert translator.calls == 1
+    assert result.output_path is not None
+    assert result.output_path.suffix == ".srt"
+    assert ".pt-BR.srt" in result.output_path.name
+    assert "pb" not in result.output_path.name
+    assert payload is not None
+    assert payload["source_language"] == "en"
+    assert payload["detected_language"] == "en"
+    assert payload["detection_probability"] == pytest.approx(0.93)
+    assert payload["target_language"] == "pt-BR"
+    assert payload["translation_executed"] is True
+    assert payload["selected_audio_stream_index"] is not None
+    assert payload["models"]
+    assert any(item.get("kind") == "asr" for item in payload["models"])
+    assert "pb" not in str(payload["target_language"])
+    dumped = str(payload)
+    assert '"pb"' not in dumped
+
+
+def test_portuguese_source_skips_translation_for_pt_br_target(
+    config: AppConfig, media_root: Path
+) -> None:
+    video = media_root / "episodio.mkv"
+    _write_clip(video)
+    repo = open_repository(config)
+    job, skipped = enqueue_path(config, repo, video, require_stability=False, source_language="pt")
+    assert skipped is None and job is not None
+    transcriber = _FakeTranscriber(language="pt")
+    translator = _FakeTranslator()
+    result = run_job(_context(config, repo, job, transcriber=transcriber, translator=translator))
+    payload = read_manifest_payload(config, job.id)
+    repo.close()
+    assert transcriber.detect_calls == 0
+    assert translator.calls == 0
+    assert result.output_path is not None
+    assert "hello" in result.output_path.read_text(encoding="utf-8")
+    assert payload is not None
+    assert payload["source_language"] == "pt"
+    assert payload["target_language"] == "pt-BR"
+    assert payload["translation_executed"] is False
+    assert payload["translation_engine_identity"] == "passthrough"
+    assert payload["detected_language"] is None
+    assert payload["source_language_source"] == "override"
+
+
+def test_low_confidence_detection_goes_to_review(config: AppConfig, media_root: Path) -> None:
+    video = media_root / "unclear.mkv"
+    _write_clip(video)
+    repo = open_repository(config)
+    job, skipped = enqueue_path(config, repo, video, require_stability=False)
+    assert skipped is None and job is not None
+    transcriber = _FakeTranscriber(language="en", probability=0.2)
+    translator = _FakeTranslator()
+    result = run_job(_context(config, repo, job, transcriber=transcriber, translator=translator))
+    refreshed = repo.get_job(job.id)
+    payload = read_manifest_payload(config, job.id)
+    repo.close()
+    assert translator.calls == 0
+    assert result.state is JobState.NEEDS_REVIEW
+    assert refreshed is not None
+    assert refreshed.error_code is ErrorCode.LANGUAGE_UNDETERMINED
+    assert result.output_path is None
+    assert payload is not None
+    assert payload["source_language_confident"] is False
+    assert payload["translation_executed"] is False
+    assert payload["target_language"] == "pt-BR"

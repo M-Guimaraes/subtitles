@@ -196,22 +196,35 @@ def plan_chunks(
 
 
 def select_audio_stream(
-    probe_result: ProbeResult, *, override_index: int | None = None
+    probe_result: ProbeResult,
+    *,
+    override_index: int | None = None,
+    config: AppConfig | None = None,
 ) -> AudioStreamInfo:
     """Pick the audio stream to transcribe.
 
-    Priority: explicit global index, then a non-commentary ``eng``/``en``
-    stream, then a Portuguese stream, then a non-commentary default, then the
-    first remaining audio stream. Raises ``invalid_media`` when none exists.
+    Priority: job-level global index, then ``audio.stream`` when it is an
+    integer, then the first non-commentary stream matching
+    ``audio.preferred_languages`` in order, then a non-commentary default,
+    then the first remaining audio stream. Raises ``invalid_media`` when none
+    exists. ``override_index`` and ``audio.stream`` are global ffprobe
+    indexes, never ``a:N`` ordinals.
     """
     streams = probe_result.audio_streams
-    if override_index is not None:
-        match = probe_result.stream_by_index(override_index)
+    configured_index: int | None = None
+    preferred: tuple[str, ...] = ("en", "ja")
+    if config is not None:
+        preferred = config.audio.preferred_languages
+        if config.audio.stream != "auto":
+            configured_index = config.audio.stream
+    effective_index = override_index if override_index is not None else configured_index
+    if effective_index is not None:
+        match = probe_result.stream_by_index(effective_index)
         if match is None:
             raise NasSubtitlesError(
-                f"no audio stream with global index {override_index}",
+                f"no audio stream with global index {effective_index}",
                 code=ErrorCode.INVALID_MEDIA,
-                detail={"audio_stream_index": override_index},
+                detail={"audio_stream_index": effective_index},
             )
         return match
     if not streams:
@@ -226,14 +239,19 @@ def select_audio_stream(
             stream.raw_language_tag
         )
 
-    english = [
-        stream for stream in streams if language_of(stream) == "en" and not stream.is_commentary
-    ]
-    if english:
-        return english[0]
-    portuguese = [stream for stream in streams if language_of(stream) == "pt"]
-    if portuguese:
-        return portuguese[0]
+    preferred_families = tuple(
+        family
+        for family in (normalize_language_tag(tag) for tag in preferred)
+        if family is not None
+    )
+    for family in preferred_families:
+        matches = [
+            stream
+            for stream in streams
+            if language_of(stream) == family and not stream.is_commentary
+        ]
+        if matches:
+            return matches[0]
     defaults = [stream for stream in streams if stream.is_default and not stream.is_commentary]
     if defaults:
         return defaults[0]

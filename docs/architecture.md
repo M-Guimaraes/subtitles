@@ -17,7 +17,7 @@ flowchart TD
   probe --> detect[detect_language]
   detect --> chunks[extract and transcribe]
   chunks --> merge[merge]
-  merge --> translate[translate, or pass through for pt]
+  merge --> translate[translate, or skip when source family equals target]
   translate --> render[render]
   render --> validate[validate]
   validate --> staging[SRT and manifest in output]
@@ -42,7 +42,7 @@ flowchart TD
 | `health.py` | Heartbeat and database check for the container healthcheck |
 | `discovery.py` | Walking roots, stability, fingerprints, existing subtitles |
 | `media.py` | ffprobe inspection, stream selection, chunked extraction |
-| `language.py` | Language tag normalisation and the source-language decision |
+| `language.py` | Public language tags, stream-selection helpers, source decision, translation skip |
 | `models.py` | Model bootstrap, verification and the model manifest |
 | `transcription.py` | faster-whisper, per-chunk checkpoints, the global merge |
 | `translation.py` | Argos, stable translation units, the SQLite cache |

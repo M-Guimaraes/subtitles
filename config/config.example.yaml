@@ -14,7 +14,15 @@ models_dir: /models
 output_dir: /output
 publish_mode: staging
 existing_subtitle_policy: skip
-target_language: pt-BR
+languages:
+  source: auto
+  target: pt-BR
+  low_confidence: review
+audio:
+  stream: auto
+  preferred_languages:
+    - en
+    - ja
 scan_interval_seconds: 600
 stability_window_seconds: 600
 minimum_file_age_seconds: 600

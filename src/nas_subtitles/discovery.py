@@ -366,7 +366,7 @@ def scan(
                 continue
             try:
                 probe_result = inspector.probe(path)
-                stream = select_audio_stream(probe_result)
+                stream = select_audio_stream(probe_result, config=config)
                 fingerprint = compute_fingerprint(
                     root=root, path=path, audio_stream_index=stream.index
                 )
@@ -493,7 +493,7 @@ def enqueue_path(
         )
     inspector = probe or FfprobeMediaProbe()
     probe_result = inspector.probe(resolved)
-    stream = select_audio_stream(probe_result, override_index=audio_stream_index)
+    stream = select_audio_stream(probe_result, override_index=audio_stream_index, config=config)
     skip_reason = _existing_subtitle_skip_reason(config, resolved, probe_result)
     if skip_reason is not None:
         log_event(

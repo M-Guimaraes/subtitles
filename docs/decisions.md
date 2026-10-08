@@ -91,6 +91,14 @@ Argos turns out to be too weak in the pilot, the honest response is to record
 the limitation and a future comparison against OPUS-MT/Marian, not to swap
 engines mid-delivery without updating lock, config and benchmark.
 
+**Stream metadata is a candidate, not the truth.** Missing and `und` tags are
+common. With `languages.source: auto`, Whisper samples are always taken and
+combined with the selected stream tag using a documented policy in
+`language.py`. Metadata alone is never a confident decision. Low confidence
+becomes `needs_review` (`language_undetermined`); it does not silently assume
+English. `pt` and `pt-BR` skip translation as the same public family; Argos
+`pb` is never compared as if it were a public identifier.
+
 ## Configuration
 
 **Everything is validated up front with clear messages,** and unknown keys

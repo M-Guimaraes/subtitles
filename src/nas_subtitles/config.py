@@ -29,6 +29,7 @@ from .domain import (
     AUDIO_CHANNELS,
     AUDIO_SAMPLE_FORMAT,
     AUDIO_SAMPLE_RATE_HZ,
+    LANGUAGE_DECISION_POLICY_VERSION,
     TRANSCRIBE_WORD_DEDUPE_VERSION,
     TRANSLATION_NORMALIZER_VERSION,
     ConfigurationError,
@@ -42,8 +43,11 @@ __all__ = [
     "ALLOWED_ASR_MODELS",
     "CONFIG_HASH_SCHEMA_VERSION",
     "DEFAULT_CONFIG_PATH",
+    "SOURCE_LANGUAGE_AUTO",
     "AppConfig",
     "AsrConfig",
+    "AudioConfig",
+    "LanguagesConfig",
     "MediaRoot",
     "SubtitlesConfig",
     "TranslationConfig",
@@ -61,7 +65,12 @@ ALLOWED_ASR_MODELS = frozenset(
     {"tiny", "base", "small", "medium", "large-v1", "large-v2", "large-v3"}
 )
 
+SOURCE_LANGUAGE_AUTO = "auto"
+"""Sentinel for automatic source-language detection."""
+
 _LANGUAGE_PAIR_RE = re.compile(r"^[a-z]{2,3}:[a-z]{2,3}$")
+_BACKEND_ONLY_PUBLIC_REJECT = frozenset({"pb"})
+"""Argos-only codes; configuration and filenames use ``pt-BR``, never ``pb``."""
 _SLUG_RE = re.compile(r"[^a-z0-9]+")
 
 _STRICT = ConfigDict(extra="forbid", frozen=True)
@@ -206,6 +215,82 @@ class TranslationConfig(BaseModel):
         return f"{source_language.lower()}:{base_target}" in self.allowed_pairs
 
 
+class LanguagesConfig(BaseModel):
+    """Public language identifiers. Backend codes such as Argos ``pb`` stay internal."""
+
+    model_config = _STRICT
+
+    source: str = SOURCE_LANGUAGE_AUTO
+    target: Literal["pt-BR"] = "pt-BR"
+    low_confidence: Literal["review"] = "review"
+
+    @field_validator("source")
+    @classmethod
+    def _source_auto_or_public_tag(cls, value: str) -> str:
+        stripped = value.strip()
+        if not stripped:
+            raise ValueError("languages.source must be 'auto' or a public language tag")
+        if stripped.lower() == SOURCE_LANGUAGE_AUTO:
+            return SOURCE_LANGUAGE_AUTO
+        folded = stripped.replace("_", "-")
+        if (
+            folded.lower() in _BACKEND_ONLY_PUBLIC_REJECT
+            or folded.lower().split("-", 1)[0] in _BACKEND_ONLY_PUBLIC_REJECT
+        ):
+            raise ValueError(
+                "languages.source must use a public identifier such as pt-BR; "
+                "Argos backend code 'pb' is not accepted"
+            )
+        return folded
+
+    @field_validator("target")
+    @classmethod
+    def _target_is_public(cls, value: str) -> str:
+        if value.lower() in _BACKEND_ONLY_PUBLIC_REJECT:
+            raise ValueError("languages.target must be the public identifier pt-BR, not pb")
+        return value
+
+
+class AudioConfig(BaseModel):
+    """Audio-stream selection. ``stream`` is a global ffprobe index, never ``a:N``."""
+
+    model_config = _STRICT
+
+    stream: Literal["auto"] | int = "auto"
+    preferred_languages: tuple[str, ...] = ("en", "ja")
+
+    @field_validator("stream")
+    @classmethod
+    def _stream_auto_or_global_index(cls, value: Literal["auto"] | int) -> Literal["auto"] | int:
+        if value == "auto":
+            return value
+        if value < 0:
+            raise ValueError("audio.stream must be 'auto' or a non-negative global ffprobe index")
+        return value
+
+    @field_validator("preferred_languages")
+    @classmethod
+    def _public_preferred_languages(cls, value: tuple[str, ...]) -> tuple[str, ...]:
+        if not value:
+            raise ValueError("audio.preferred_languages must list at least one public language")
+        normalised: list[str] = []
+        for raw in value:
+            tag = raw.strip().replace("_", "-")
+            if not tag:
+                raise ValueError("audio.preferred_languages entries must not be empty")
+            lowered = tag.lower()
+            if (
+                lowered in _BACKEND_ONLY_PUBLIC_REJECT
+                or lowered.split("-", 1)[0] in _BACKEND_ONLY_PUBLIC_REJECT
+            ):
+                raise ValueError(
+                    "audio.preferred_languages must use public identifiers; "
+                    "Argos backend code 'pb' is not accepted"
+                )
+            normalised.append(tag)
+        return tuple(normalised)
+
+
 class SubtitlesConfig(BaseModel):
     model_config = _STRICT
 
@@ -237,7 +322,8 @@ class AppConfig(BaseModel):
     output_dir: Path
     publish_mode: PublishMode = PublishMode.STAGING
     existing_subtitle_policy: ExistingSubtitlePolicy = ExistingSubtitlePolicy.SKIP
-    target_language: Literal["pt-BR"] = "pt-BR"
+    languages: LanguagesConfig = Field(default_factory=LanguagesConfig)
+    audio: AudioConfig = Field(default_factory=AudioConfig)
     scan_interval_seconds: int = Field(default=600, ge=1)
     stability_window_seconds: int = Field(default=600, ge=0)
     minimum_file_age_seconds: int = Field(default=600, ge=0)
@@ -248,6 +334,35 @@ class AppConfig(BaseModel):
     subtitles: SubtitlesConfig = Field(default_factory=SubtitlesConfig)
 
     # -- validation -------------------------------------------------------- #
+
+    @model_validator(mode="before")
+    @classmethod
+    def _fold_legacy_target_language(cls, value: Any) -> Any:
+        """Accept the historical top-level ``target_language`` key.
+
+        Nested ``languages.target`` is the schema. An old file that still has
+        ``target_language: pt-BR`` at the root is folded in; both keys must
+        agree when they appear together.
+        """
+        if not isinstance(value, dict):
+            return value
+        payload = dict(value)
+        top = payload.pop("target_language", None)
+        if top is None:
+            return payload
+        languages = payload.get("languages")
+        if languages is None:
+            payload["languages"] = {"target": top}
+            return payload
+        if not isinstance(languages, dict):
+            return payload
+        nested = languages.get("target")
+        if nested is None:
+            payload["languages"] = {**languages, "target": top}
+            return payload
+        if nested != top:
+            raise ValueError("languages.target and legacy target_language must match")
+        return payload
 
     @field_validator("media_roots", "state_dir", "work_dir", "models_dir", "output_dir")
     @classmethod
@@ -300,6 +415,11 @@ class AppConfig(BaseModel):
     # -- derived values ---------------------------------------------------- #
 
     @property
+    def target_language(self) -> str:
+        """Public destination tag used in filenames and manifests, never ``pb``."""
+        return self.languages.target
+
+    @property
     def roots(self) -> tuple[MediaRoot, ...]:
         return tuple(MediaRoot(path=path, root_id=root_id_for(path)) for path in self.media_roots)
 
@@ -348,6 +468,9 @@ class AppConfig(BaseModel):
             {
                 "schema": CONFIG_HASH_SCHEMA_VERSION,
                 "target_language": self.target_language,
+                "languages": self.languages.model_dump(mode="json"),
+                "audio": self.audio.model_dump(mode="json"),
+                "language_policy": LANGUAGE_DECISION_POLICY_VERSION,
                 "translation_backend": self._translation_backend_identity(),
                 "asr": self.asr.model_dump(mode="json"),
                 "translation": self.translation.model_dump(mode="json"),
@@ -378,13 +501,16 @@ class AppConfig(BaseModel):
         subtitles = self.subtitles.model_dump(mode="json")
         match stage:
             case PipelineStage.PROBE:
-                return {}
+                return {"audio": self.audio.model_dump(mode="json")}
             case PipelineStage.DETECT_LANGUAGE:
                 return {
                     "model": asr["model"],
                     "device": asr["device"],
                     "compute_type": asr["compute_type"],
                     "detection_min_probability": asr["detection_min_probability"],
+                    "languages": self.languages.model_dump(mode="json"),
+                    "audio": self.audio.model_dump(mode="json"),
+                    "language_policy": LANGUAGE_DECISION_POLICY_VERSION,
                 }
             case PipelineStage.EXTRACT:
                 return chunking
@@ -400,6 +526,8 @@ class AppConfig(BaseModel):
                 return {
                     "translation": self.translation.model_dump(mode="json"),
                     "target_language": self.target_language,
+                    "languages": self.languages.model_dump(mode="json"),
+                    "language_policy": LANGUAGE_DECISION_POLICY_VERSION,
                     "translation_backend": self._translation_backend_identity(),
                     "normalizer": TRANSLATION_NORMALIZER_VERSION,
                 }

@@ -349,7 +349,7 @@ def inspect(
         config = _load(config_path)
         root, resolved = discovery.resolve_explicit_path(config, path)
         probe_result = FfprobeMediaProbe().probe(resolved)
-        selected = select_audio_stream(probe_result)
+        selected = select_audio_stream(probe_result, config=config)
         existing = discovery.find_existing_subtitles(path=resolved, probe_result=probe_result)
         payload = {
             "ok": True,
@@ -358,11 +358,15 @@ def inspect(
             "duration_seconds": probe_result.duration_seconds,
             "selected_audio_stream_index": selected.index,
             "selected_audio_language": selected.language,
+            "target_language": config.target_language,
             "audio_streams": [
                 {
                     "index": stream.index,
                     "language": stream.language,
+                    "raw_language_tag": stream.raw_language_tag,
+                    "title": stream.title,
                     "codec": stream.codec_name,
+                    "channels": stream.channels,
                     "is_default": stream.is_default,
                     "is_commentary": stream.is_commentary,
                     "start_time_seconds": stream.start_time_seconds,
@@ -653,9 +657,23 @@ def jobs_show(
         record = repo.require_job(job_id)
         artifacts = repo.list_artifacts(job_id=job_id)
         metrics = repo.get_metrics(job_id)
+        manifest = output.read_manifest_payload(config, job_id)
         payload = {
             "ok": True,
             "job": _job_payload(record),
+            "language": None
+            if manifest is None
+            else {
+                "selected_audio_stream_index": manifest.get("selected_audio_stream_index"),
+                "stream_language": manifest.get("stream_language"),
+                "detected_language": manifest.get("detected_language"),
+                "detection_probability": manifest.get("detection_probability"),
+                "source_language": manifest.get("source_language"),
+                "source_language_source": manifest.get("source_language_source"),
+                "target_language": manifest.get("target_language"),
+                "translation_executed": manifest.get("translation_executed"),
+                "models": manifest.get("models"),
+            },
             "artifacts": [
                 {"stage": str(item.stage), "chunk_index": item.chunk_index, "sha256": item.sha256}
                 for item in artifacts

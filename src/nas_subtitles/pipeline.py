@@ -16,18 +16,23 @@ from threading import Event
 from .config import AppConfig
 from .discovery import compute_fingerprint, find_existing_subtitles, has_portuguese_subtitle
 from .domain import (
-    ENGLISH,
-    PORTUGUESE,
     ArtifactRecord,
     AudioChunk,
     AudioExtractor,
+    AudioStreamInfo,
     ErrorCode,
+    EventLevel,
+    JobEvent,
     JobManifest,
     JobMetrics,
     JobRecord,
     JobRepository,
     JobState,
+    LanguageDecision,
+    LanguageSource,
+    MediaFingerprint,
     MediaProbe,
+    ModelIdentity,
     ModelKind,
     NasSubtitlesError,
     PipelineStage,
@@ -39,7 +44,12 @@ from .domain import (
     TranslatedUnit,
     Translator,
 )
-from .language import decide_source_language, is_supported_source
+from .language import (
+    decide_source_language,
+    effective_source_override,
+    is_supported_source,
+    translation_is_required,
+)
 from .logging_setup import log_event
 from .media import (
     FfmpegAudioExtractor,
@@ -171,7 +181,11 @@ def run_job(
         return PipelineResult(
             job_id=job.id, state=job.state, last_stage=PipelineStage.PROBE, quality=QualityReport()
         )
-    stream = select_audio_stream(probe_result, override_index=job.audio_stream_index_override)
+    stream = select_audio_stream(
+        probe_result,
+        override_index=job.audio_stream_index_override,
+        config=config,
+    )
     duration = probe_result.duration_seconds
     if job.preview_seconds is not None:
         offset = job.preview_offset_seconds or 0.0
@@ -183,23 +197,37 @@ def run_job(
     job = repo.transition(
         job_id=job.id, state=JobState.RUNNING, stage=PipelineStage.DETECT_LANGUAGE
     )
+    override = effective_source_override(config, job_override=job.source_language_override)
     decision = decide_source_language(
         config,
         stream=stream,
-        override=job.source_language_override,
+        override=override,
         transcriber=context.transcriber,
     )
-    needs_detection = (
-        (not decision.confident or decision.language is None)
-        and job.source_language_override is None
-        and stream.language is None
-    )
-    if needs_detection:
+    if override is None:
         samples = _language_sample_chunks(
             context, video=video, stream_index=stream.index, duration=duration
         )
-        decision = context.transcriber.detect_language(samples)
+        asr_decision = context.transcriber.detect_language(samples)
+        decision = decide_source_language(
+            config,
+            stream=stream,
+            samples=asr_decision.samples,
+            transcriber=context.transcriber,
+        )
+    _record_language_decision(context, stream=stream, decision=decision)
     if not decision.confident or decision.language is None:
+        write_manifest(
+            config,
+            _language_manifest(
+                context,
+                fingerprint=fingerprint,
+                stream=stream,
+                decision=decision,
+                source_language=None,
+                translation_executed=False,
+            ),
+        )
         job = repo.transition(
             job_id=job.id,
             state=JobState.NEEDS_REVIEW,
@@ -215,6 +243,17 @@ def run_job(
         )
     language = decision.language
     if not is_supported_source(language):
+        write_manifest(
+            config,
+            _language_manifest(
+                context,
+                fingerprint=fingerprint,
+                stream=stream,
+                decision=decision,
+                source_language=language,
+                translation_executed=False,
+            ),
+        )
         job = repo.transition(
             job_id=job.id,
             state=JobState.FAILED,
@@ -294,7 +333,10 @@ def run_job(
         fingerprint_digest=fingerprint.digest(),
         target_language=config.target_language,
     )
-    if language == PORTUGUESE:
+    skip_translation = not translation_is_required(
+        source_language=language, target_language=config.target_language
+    )
+    if skip_translation:
         translated = tuple(
             TranslatedUnit(
                 unit_id=unit.unit_id,
@@ -306,15 +348,26 @@ def run_job(
             )
             for unit in units
         )
-    elif language == ENGLISH:
-        if not context.translator.supports(source_language="en", target_language="pt"):
-            raise NasSubtitlesError(
-                "direct en->pt pair is not available",
-                code=ErrorCode.TRANSLATION_PAIR_MISSING,
-            )
-        translated = translate_with_cache(units, translator=context.translator, repository=repo)
+        translation_executed = False
+        translation_engine_identity = "passthrough"
+        log_event(
+            _LOG,
+            "translation skipped",
+            job_id=job.id,
+            source_language=language,
+            target_language=config.target_language,
+        )
+    elif not context.translator.supports(
+        source_language=language, target_language=config.target_language
+    ):
+        raise NasSubtitlesError(
+            "no direct translation pair is installed for this language",
+            code=ErrorCode.TRANSLATION_PAIR_MISSING,
+        )
     else:
-        raise NasSubtitlesError("unsupported source language", code=ErrorCode.UNSUPPORTED_LANGUAGE)
+        translated = translate_with_cache(units, translator=context.translator, repository=repo)
+        translation_executed = True
+        translation_engine_identity = context.translator.engine_identity
 
     job = repo.transition(job_id=job.id, state=JobState.RUNNING, stage=PipelineStage.RENDER)
     cues = segment_units_into_cues(config, translated, source_units=units)
@@ -338,12 +391,14 @@ def run_job(
     subtitle_sha = _sha256(destination)
     write_manifest(
         config,
-        JobManifest(
-            job_id=job.id,
+        _language_manifest(
+            context,
             fingerprint=fingerprint,
-            pipeline_config_hash=config.pipeline_config_hash,
+            stream=stream,
+            decision=decision,
             source_language=language,
-            target_language=config.target_language,
+            translation_executed=translation_executed,
+            translation_engine_identity=translation_engine_identity,
             quality=quality,
             subtitle_sha256=subtitle_sha,
         ),
@@ -442,6 +497,86 @@ def _maybe_publish_sidecar(
         cue_count=cue_count,
         media_seconds=media_seconds,
     )
+
+
+def _language_manifest(
+    context: StageContext,
+    *,
+    fingerprint: MediaFingerprint,
+    stream: AudioStreamInfo,
+    decision: LanguageDecision,
+    source_language: str | None,
+    translation_executed: bool | None = None,
+    translation_engine_identity: str | None = None,
+    quality: QualityReport | None = None,
+    subtitle_sha256: str | None = None,
+) -> JobManifest:
+    return JobManifest(
+        job_id=context.job.id,
+        fingerprint=fingerprint,
+        pipeline_config_hash=context.config.pipeline_config_hash,
+        source_language=source_language,
+        target_language=context.config.target_language,
+        selected_audio_stream_index=stream.index,
+        stream_language=stream.language,
+        stream_language_tag=stream.raw_language_tag,
+        detected_language=(
+            decision.language if decision.source is LanguageSource.DETECTION else None
+        ),
+        detection_probability=decision.probability,
+        source_language_source=decision.source,
+        source_language_confident=decision.confident,
+        source_language_reason=decision.reason,
+        translation_executed=translation_executed,
+        translation_engine_identity=translation_engine_identity,
+        models=_model_identities(context),
+        quality=quality or QualityReport(),
+        subtitle_sha256=subtitle_sha256,
+    )
+
+
+def _record_language_decision(
+    context: StageContext, *, stream: AudioStreamInfo, decision: LanguageDecision
+) -> None:
+    payload: dict[str, object] = {
+        "selected_audio_stream_index": stream.index,
+        "stream_language": stream.language,
+        "detected_language": decision.language,
+        "detection_probability": decision.probability,
+        "source": str(decision.source),
+        "confident": decision.confident,
+        "target_language": context.config.target_language,
+        "reason": decision.reason,
+    }
+    context.repository.append_event(
+        JobEvent(
+            level=EventLevel.INFO,
+            code="language_decision",
+            job_id=context.job.id,
+            payload=payload,
+        )
+    )
+    log_event(
+        _LOG,
+        "language decision",
+        job_id=context.job.id,
+        selected_audio_stream_index=stream.index,
+        stream_language=stream.language,
+        detected_language=decision.language,
+        detection_probability=decision.probability,
+        language_source=str(decision.source),
+        confident=decision.confident,
+        target_language=context.config.target_language,
+        reason=decision.reason,
+    )
+
+
+def _model_identities(context: StageContext) -> tuple[ModelIdentity, ...]:
+    identities = [context.transcriber.model_identity]
+    translation_identity = getattr(context.translator, "_model_identity", None)
+    if isinstance(translation_identity, ModelIdentity):
+        identities.append(translation_identity)
+    return tuple(identities)
 
 
 def _language_sample_chunks(

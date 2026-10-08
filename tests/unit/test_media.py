@@ -67,6 +67,29 @@ def test_portuguese_is_chosen_when_english_is_only_commentary() -> None:
     assert select_audio_stream(_probe(*streams)).index == 2
 
 
+def test_preferred_languages_are_deterministic_and_prefer_ja_over_pt(config: AppConfig) -> None:
+    streams = (
+        AudioStreamInfo(index=1, language="pt", is_default=True),
+        AudioStreamInfo(index=2, language="jpn"),
+        AudioStreamInfo(index=3, language="en", is_commentary=True),
+    )
+    assert select_audio_stream(_probe(*streams), config=config).index == 2
+    english_only = config.model_copy(
+        update={"audio": config.audio.model_copy(update={"preferred_languages": ("en",)})}
+    )
+    assert select_audio_stream(_probe(*streams), config=english_only).index == 1
+
+
+def test_configured_global_stream_index_is_not_an_a_n_ordinal(config: AppConfig) -> None:
+    streams = (
+        AudioStreamInfo(index=1, language="en"),
+        AudioStreamInfo(index=2, language="ja"),
+    )
+    pinned = config.model_copy(update={"audio": config.audio.model_copy(update={"stream": 2})})
+    assert select_audio_stream(_probe(*streams), config=pinned).index == 2
+    assert select_audio_stream(_probe(*streams), override_index=1, config=pinned).index == 1
+
+
 def test_no_audio_is_invalid_media() -> None:
     with pytest.raises(NasSubtitlesError) as raised:
         select_audio_stream(_probe())

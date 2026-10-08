@@ -19,6 +19,11 @@ def test_example_config_matches_the_documented_defaults(config: AppConfig) -> No
     assert config.publish_mode is PublishMode.STAGING
     assert config.existing_subtitle_policy is ExistingSubtitlePolicy.SKIP
     assert config.target_language == "pt-BR"
+    assert config.languages.source == "auto"
+    assert config.languages.target == "pt-BR"
+    assert config.languages.low_confidence == "review"
+    assert config.audio.stream == "auto"
+    assert config.audio.preferred_languages == ("en", "ja")
     assert config.scan_interval_seconds == 600
     assert config.stability_window_seconds == 600
     assert config.minimum_file_age_seconds == 600
@@ -194,6 +199,58 @@ def test_stability_window_must_not_be_negative(tmp_path: Path, config_path: Path
     broken.write_text(text, encoding="utf-8")
     with pytest.raises(ConfigurationError, match="stability_window_seconds"):
         load_config(broken)
+
+
+def test_legacy_top_level_target_language_still_loads(tmp_path: Path, config_path: Path) -> None:
+    text = config_path.read_text(encoding="utf-8")
+    text = text.replace(
+        "languages:\n  source: auto\n  target: pt-BR\n  low_confidence: review\n",
+        "target_language: pt-BR\n",
+    )
+    legacy = tmp_path / "legacy.yaml"
+    legacy.write_text(text, encoding="utf-8")
+    loaded = load_config(legacy)
+    assert loaded.target_language == "pt-BR"
+    assert loaded.languages.source == "auto"
+
+
+def test_argos_backend_code_is_rejected_in_public_language_config(
+    tmp_path: Path, config_path: Path
+) -> None:
+    broken = tmp_path / "pb.yaml"
+    text = config_path.read_text(encoding="utf-8").replace("source: auto", "source: pb")
+    broken.write_text(text, encoding="utf-8")
+    with pytest.raises(ConfigurationError, match="pb"):
+        load_config(broken)
+
+
+def test_argos_backend_code_is_rejected_in_preferred_languages(
+    tmp_path: Path, config_path: Path
+) -> None:
+    broken = tmp_path / "pb-audio.yaml"
+    text = config_path.read_text(encoding="utf-8").replace(
+        "preferred_languages:\n    - en\n    - ja\n",
+        "preferred_languages:\n    - en\n    - pb\n",
+    )
+    broken.write_text(text, encoding="utf-8")
+    with pytest.raises(ConfigurationError, match="pb"):
+        load_config(broken)
+
+
+def test_language_and_audio_settings_participate_in_pipeline_identity(config: AppConfig) -> None:
+    before = config.pipeline_config_hash
+    detect_before = config.stage_config_hash(PipelineStage.DETECT_LANGUAGE)
+    transcribe_before = config.stage_config_hash(PipelineStage.TRANSCRIBE)
+    changed = config.model_copy(
+        update={
+            "languages": config.languages.model_copy(update={"source": "en"}),
+            "audio": config.audio.model_copy(update={"preferred_languages": ("en",)}),
+        }
+    )
+    assert changed.pipeline_config_hash != before
+    assert changed.stage_config_hash(PipelineStage.DETECT_LANGUAGE) != detect_before
+    assert changed.stage_config_hash(PipelineStage.TRANSCRIBE) == transcribe_before
+    assert changed.target_language == "pt-BR"
 
 
 def test_transcribe_hash_includes_word_dedupe_version(
