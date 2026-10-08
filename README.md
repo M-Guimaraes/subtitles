@@ -74,6 +74,13 @@ Start the worker only once you are satisfied:
 docker compose -f compose.yaml -f compose.offline.yaml up -d
 ```
 
+The optional dashboard is a second container. Stopping it does not stop the
+worker. The published port is host loopback only:
+
+```bash
+docker compose -f compose.yaml -f compose.offline.yaml -f compose.dashboard.yaml up -d
+```
+
 The full sequence, including the scanner dry run and the pilot, is in
 [docs/runbook.md](docs/runbook.md).
 
@@ -95,6 +102,7 @@ nas-subs benchmark PATH      measure throughput and memory on a short window
 nas-subs health              heartbeat and database check, used by Docker
 nas-subs cleanup             remove stale intermediates inside work_dir
 nas-subs backup              consistent backup of config, manifest and database
+nas-subs dashboard           optional LAN UI; does not process jobs
 ```
 
 Every command accepts `--json` and none of them prompts. Exit codes: `0`

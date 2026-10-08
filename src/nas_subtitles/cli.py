@@ -27,7 +27,7 @@ from typing import Literal
 
 import typer
 
-from . import discovery, models, output, repository, worker
+from . import dashboard, discovery, models, output, repository, worker
 from .config import DEFAULT_CONFIG_PATH, AppConfig, load_config
 from .domain import (
     ErrorCode,
@@ -192,6 +192,24 @@ def _doctor_checks(config: AppConfig) -> list[DoctorCheck]:
             report.reason,
         )
     )
+
+    bind = dashboard.resolve_dashboard_bind(config)
+    if bind.public_bind and not bind.requires_token:
+        checks.append(
+            DoctorCheck(
+                "dashboard",
+                "warn",
+                "dashboard.bind is a public address without a token; "
+                "do not publish this port on the internet",
+            )
+        )
+    elif not dashboard.STATIC_DIR.joinpath("index.html").is_file():
+        checks.append(DoctorCheck("dashboard", "fail", "dashboard assets are missing"))
+    else:
+        detail = f"{bind.host}:{bind.port}"
+        if bind.requires_token:
+            detail += ", token configured"
+        checks.append(DoctorCheck("dashboard", "ok", detail))
 
     try:
         verified = models.verify_models(config, offline=True)
@@ -531,6 +549,34 @@ def daemon_command(
     """Long-lived automatic processing service (same process as ``worker``)."""
     with _handled(as_json=json_output):
         _run_daemon(config_path, json_output)
+
+
+@app.command("dashboard")
+def dashboard_command(
+    host: str | None = typer.Option(
+        None, "--host", help="Override dashboard.bind. Defaults to loopback."
+    ),
+    port: int | None = typer.Option(None, "--port", help="Override dashboard.port."),
+    config_path: Path = _CONFIG_OPTION,
+    json_output: bool = _JSON_OPTION,
+) -> None:
+    """Serve the operator dashboard. Does not process jobs or take the worker lock."""
+    with _handled(as_json=json_output):
+        config = _load(config_path)
+        repo = repository.open_repository(config)
+        bind = dashboard.resolve_dashboard_bind(config, host=host, port=port)
+        _emit(
+            {
+                "ok": True,
+                "bind": bind.host,
+                "port": bind.port,
+                "auth_required": bind.requires_token,
+                "worker_independent": True,
+            },
+            as_json=json_output,
+            text=f"dashboard on {bind.host}:{bind.port}",
+        )
+        dashboard.serve_dashboard(config, repo, host=bind.host, port=bind.port, token=bind.token)
 
 
 @app.command()

@@ -55,3 +55,6 @@ subtitles:
   min_duration_seconds: 1.0
   max_duration_seconds: 7.0
   write_source_srt: false
+dashboard:
+  bind: 127.0.0.1
+  port: 8787

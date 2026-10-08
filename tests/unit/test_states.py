@@ -41,9 +41,16 @@ def test_terminal_states_have_no_automatic_exit() -> None:
         assert not can_transition(state, JobState.RUNNING)
 
 
+def test_operator_can_reprocess_terminal_jobs() -> None:
+    """Human reprocess may re-queue; the worker still cannot reopen them as running."""
+    for state in (JobState.COMPLETED, JobState.SKIPPED, JobState.CANCELLED):
+        assert can_transition(state, JobState.QUEUED)
+        assert not can_transition(state, JobState.RUNNING)
+
+
 def test_forbidden_transition_raises_invalid_state() -> None:
     with pytest.raises(NasSubtitlesError) as raised:
-        ensure_transition(JobState.COMPLETED, JobState.QUEUED)
+        ensure_transition(JobState.COMPLETED, JobState.RUNNING)
     assert raised.value.code is ErrorCode.INVALID_STATE_TRANSITION
 
 

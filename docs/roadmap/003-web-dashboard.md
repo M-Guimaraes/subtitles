@@ -1,6 +1,6 @@
 # 003 — Web Dashboard
 
-**Status:** PLANNED
+**Status:** IN PROGRESS
 
 ## Goal
 

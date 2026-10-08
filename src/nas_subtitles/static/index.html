@@ -1,0 +1,83 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>nas-subs dashboard</title>
+    <link rel="stylesheet" href="/static/dashboard.css" />
+  </head>
+  <body>
+    <header class="top">
+      <div class="brand">
+        <strong>nas-subs</strong>
+        <span class="muted">local subtitle queue</span>
+      </div>
+      <nav>
+        <button type="button" data-view="queue" class="active">Queue</button>
+        <button type="button" data-view="history">History</button>
+        <button type="button" data-view="settings">Settings</button>
+      </nav>
+      <div id="worker-pill" class="pill unknown">worker…</div>
+    </header>
+    <main>
+      <section id="list-page">
+        <div class="toolbar">
+          <div>
+            <h1 id="page-title">Queue</h1>
+            <p id="page-subtitle" class="muted">Active and waiting jobs</p>
+          </div>
+          <div class="toolbar-actions">
+            <label class="filter">
+              State
+              <select id="state-filter"></select>
+            </label>
+            <button type="button" id="rescan">Rescan library</button>
+            <button type="button" id="refresh" class="secondary">Refresh</button>
+          </div>
+        </div>
+        <p id="banner" class="banner hidden"></p>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>Title</th>
+                <th>State</th>
+                <th>Stage</th>
+                <th>Source</th>
+                <th>Target</th>
+                <th>Updated</th>
+                <th>Error</th>
+              </tr>
+            </thead>
+            <tbody id="job-rows">
+              <tr>
+                <td colspan="7" class="muted">Loading…</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+      <section id="detail-page" class="hidden">
+        <button type="button" id="back" class="secondary">← Back</button>
+        <div class="detail-head">
+          <div>
+            <h1 id="detail-title">Job</h1>
+            <p id="detail-path" class="muted"></p>
+          </div>
+          <div id="detail-actions" class="toolbar-actions"></div>
+        </div>
+        <div id="detail-grid" class="cards"></div>
+      </section>
+      <section id="settings-page" class="hidden">
+        <h1>Settings</h1>
+        <p class="muted">
+          Read-only operational values from config.yaml. Edit the file and
+          restart the worker to change them. The dashboard never writes
+          configuration.
+        </p>
+        <div id="settings-grid" class="cards"></div>
+      </section>
+    </main>
+    <script src="/static/dashboard.js"></script>
+  </body>
+</html>

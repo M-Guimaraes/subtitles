@@ -142,6 +142,7 @@ promise about how long the whole library will take.
 ## Deliberately out of scope
 
 OCR and PGS, diarization, subtitle providers, translating downloaded
-subtitles, a web UI or API, GPU, multiple workers, LLM translation, Redis,
-PostgreSQL, Celery, Kubernetes. No changes to ZFS, the USB enclosure,
+subtitles, GPU, multiple workers, LLM translation, Redis, PostgreSQL,
+Celery, Kubernetes. A LAN dashboard exists as a separate process and is not
+required for processing. No changes to ZFS, the USB enclosure,
 `~/nas-stack`, Bazarr, Jellyfin or any existing container.
