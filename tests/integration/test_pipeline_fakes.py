@@ -101,11 +101,9 @@ class _FakeTranslator:
 
     def supports(self, *, source_language: str, target_language: str) -> bool:
         family = target_language.split("-", 1)[0]
-        if source_language == "en" and family == "pt":
-            return True
-        if source_language == "pt" and family == "en":
-            return True
-        return False
+        return (source_language == "en" and family == "pt") or (
+            source_language == "pt" and family == "en"
+        )
 
     def translate(self, units):
         self.calls += 1
@@ -303,9 +301,8 @@ def test_low_confidence_detection_goes_to_review(config: AppConfig, media_root: 
 
 
 def _with_targets(config: AppConfig, *targets: str) -> AppConfig:
-    return config.model_copy(
-        update={"languages": LanguagesConfig(source="auto", targets=targets, low_confidence="review")}
-    )
+    languages = LanguagesConfig(source="auto", targets=targets, low_confidence="review")
+    return config.model_copy(update={"languages": languages})
 
 
 class _PtOnlyTranslator(_FakeTranslator):
@@ -349,7 +346,11 @@ def test_portuguese_source_skips_translation_only_for_matching_target(
     results = {
         job.target_language: run_job(
             _context(
-                config, repo, job, transcriber=_FakeTranscriber(language="pt"), translator=translator
+                config,
+                repo,
+                job,
+                transcriber=_FakeTranscriber(language="pt"),
+                translator=translator,
             )
         )
         for job in queued.jobs

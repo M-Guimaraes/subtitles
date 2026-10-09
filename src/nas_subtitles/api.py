@@ -273,11 +273,7 @@ def job_summary(
     source = resolved.get("source_language") or job.source_language_override
     detected = resolved.get("detected_language")
     probability = resolved.get("detection_probability")
-    target = (
-        resolved.get("target_language")
-        or job.target_language
-        or config.target_language
-    )
+    target = resolved.get("target_language") or job.target_language or config.target_language
     return {
         "id": job.id,
         "title": Path(job.relative_path).name,

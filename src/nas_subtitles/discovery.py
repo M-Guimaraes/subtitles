@@ -350,9 +350,7 @@ def subtitle_satisfies_language(item: ExistingSubtitle, target_language: str) ->
     return item_family is not None and item_family == family
 
 
-def has_subtitle_for_target(
-    subtitles: tuple[ExistingSubtitle, ...], target_language: str
-) -> bool:
+def has_subtitle_for_target(subtitles: tuple[ExistingSubtitle, ...], target_language: str) -> bool:
     """True when a complete, non-forced subtitle already covers ``target_language``."""
     return any(subtitle_satisfies_language(item, target_language) for item in subtitles)
 

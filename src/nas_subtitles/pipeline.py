@@ -363,9 +363,7 @@ def run_job(
             source_language=language,
             target_language=target_language,
         )
-    elif not context.translator.supports(
-        source_language=language, target_language=target_language
-    ):
+    elif not context.translator.supports(source_language=language, target_language=target_language):
         raise NasSubtitlesError(
             "no direct translation pair is installed for this language",
             code=ErrorCode.TRANSLATION_PAIR_MISSING,

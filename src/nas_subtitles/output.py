@@ -256,9 +256,7 @@ def publish_job(config: AppConfig, repository: JobRepository, job: JobRecord) ->
                 f"a {target_language} subtitle already exists beside the video",
                 code=ErrorCode.OUTPUT_CONFLICT,
             )
-        target = sidecar_path_for(
-            config, root, job.relative_path, target_language=target_language
-        )
+        target = sidecar_path_for(config, root, job.relative_path, target_language=target_language)
         result = publish_exclusive(content=content, target=target)
     else:
         result = PublishResult(

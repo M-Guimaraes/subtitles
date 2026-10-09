@@ -241,12 +241,13 @@ def test_stability_window_must_not_be_negative(tmp_path: Path, config_path: Path
 
 def test_legacy_top_level_target_language_still_loads(tmp_path: Path, config_path: Path) -> None:
     text = config_path.read_text(encoding="utf-8")
-    text = text.replace(
-        "languages:\n  source: auto\n  # Public identifiers only (pt-BR, en, es). Argos `pb` is internal.\n"
+    languages_block = (
+        "languages:\n  source: auto\n"
+        "  # Public identifiers only (pt-BR, en, es). Argos `pb` is internal.\n"
         "  # A legacy single `target: pt-BR` key still loads and is folded into targets.\n"
-        "  targets:\n    - pt-BR\n  low_confidence: review\n",
-        "target_language: pt-BR\n",
+        "  targets:\n    - pt-BR\n  low_confidence: review\n"
     )
+    text = text.replace(languages_block, "target_language: pt-BR\n")
     legacy = tmp_path / "legacy.yaml"
     legacy.write_text(text, encoding="utf-8")
     loaded = load_config(legacy)

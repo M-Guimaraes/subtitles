@@ -31,9 +31,8 @@ class _FakeProbe:
 
 
 def _with_targets(config: AppConfig, *targets: str) -> AppConfig:
-    return config.model_copy(
-        update={"languages": LanguagesConfig(source="auto", targets=targets, low_confidence="review")}
-    )
+    languages = LanguagesConfig(source="auto", targets=targets, low_confidence="review")
+    return config.model_copy(update={"languages": languages})
 
 
 def _fast(config: AppConfig) -> AppConfig:
@@ -108,9 +107,7 @@ def test_english_sidecar_does_not_skip_portuguese_target(
     assert by_target["pt-BR"].skip_reason is None
 
 
-def test_dashboard_and_webhook_expose_each_job_target(
-    config: AppConfig, media_root: Path
-) -> None:
+def test_dashboard_and_webhook_expose_each_job_target(config: AppConfig, media_root: Path) -> None:
     config = _with_targets(config, "pt-BR", "en")
     video = media_root / "Show.S01E01.mkv"
     video.write_bytes(b"x" * 32)

@@ -640,9 +640,7 @@ class AppConfig(BaseModel):
         """
         return self.pipeline_config_hash_for(self.target_language)
 
-    def stage_config_hash(
-        self, stage: PipelineStage, *, target_language: str | None = None
-    ) -> str:
+    def stage_config_hash(self, stage: PipelineStage, *, target_language: str | None = None) -> str:
         """Hash of only the settings that stage depends on."""
         return stable_digest(
             {
@@ -676,9 +674,7 @@ class AppConfig(BaseModel):
             "low_confidence": self.languages.low_confidence,
         }
 
-    def _stage_settings(
-        self, stage: PipelineStage, *, target_language: str
-    ) -> dict[str, Any]:
+    def _stage_settings(self, stage: PipelineStage, *, target_language: str) -> dict[str, Any]:
         asr = self.asr.model_dump(mode="json")
         chunking = {
             "chunk_seconds": self.asr.chunk_seconds,
