@@ -12,5 +12,6 @@ The active feature and status are controlled by `/ROADMAP.md`. Coding agents mus
 4. `003-web-dashboard.md`
 5. `004-sonarr-radarr-webhooks.md`
 6. `005-multiple-target-languages.md`
+7. `006-dubbing-pt-br.md`
 
 Do not implement later items opportunistically while working on an earlier feature unless a minimal prerequisite is unavoidable. If such a prerequisite is discovered, document the decision in `/ROADMAP.md`.
