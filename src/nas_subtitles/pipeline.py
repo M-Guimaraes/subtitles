@@ -27,6 +27,7 @@ from .domain import (
     ErrorCode,
     EventLevel,
     JobEvent,
+    JobKind,
     JobManifest,
     JobMetrics,
     JobRecord,
@@ -47,6 +48,9 @@ from .domain import (
     Transcriber,
     TranslatedUnit,
     Translator,
+    infer_job_kind,
+    stage_window,
+    stages_for,
 )
 from .language import (
     decide_source_language,
@@ -157,8 +161,34 @@ def run_job(
     start_stage: PipelineStage | None = None,
     stop_after: PipelineStage | None = None,
 ) -> PipelineResult:
-    """Run the job from its current stage, honouring cancellation and SIGTERM."""
-    del start_stage, stop_after
+    """Run the job from its current stage, honouring cancellation and SIGTERM.
+
+    ``start_stage`` / ``stop_after`` slice the sequence for that job kind.
+    Subtitle jobs still start at probe in this phase; a later start raises
+    ``not_implemented`` rather than pretending checkpoints exist.
+    """
+    job = context.job
+    kind = infer_job_kind(job.job_kind)
+    try:
+        window = stage_window(stages_for(kind), start_stage=start_stage, stop_after=stop_after)
+    except ValueError as exc:
+        raise NasSubtitlesError(str(exc), code=ErrorCode.CONFIG_INVALID) from exc
+    if kind is JobKind.DUBBING:
+        from .dubbing import run_dubbing_job
+
+        return run_dubbing_job(context, start_stage=start_stage, stop_after=stop_after)
+    if window[0] is not PipelineStage.PROBE:
+        raise NasSubtitlesError(
+            "subtitle jobs resume from probe; mid-pipeline start_stage is not implemented",
+            code=ErrorCode.NOT_IMPLEMENTED,
+        )
+    return _run_subtitle_job(context, stop_after=stop_after)
+
+
+def _run_subtitle_job(
+    context: StageContext, *, stop_after: PipelineStage | None = None
+) -> PipelineResult:
+    """Subtitle pipeline. Existing target sidecars still skip *subtitle* jobs only."""
     config = context.config
     repo = context.repository
     job = context.job
@@ -199,6 +229,14 @@ def run_job(
     fingerprint = compute_fingerprint(root=root, path=video, audio_stream_index=stream.index)
     if not fingerprint.content_matches(job.fingerprint):
         raise NasSubtitlesError("media changed before processing", code=ErrorCode.MEDIA_CHANGED)
+    if stop_after is PipelineStage.PROBE:
+        return PipelineResult(
+            job_id=job.id,
+            state=job.state,
+            last_stage=PipelineStage.PROBE,
+            quality=QualityReport(),
+            media_seconds=duration,
+        )
 
     job = repo.transition(
         job_id=job.id, state=JobState.RUNNING, stage=PipelineStage.DETECT_LANGUAGE
@@ -266,6 +304,14 @@ def run_job(
             error_code=ErrorCode.UNSUPPORTED_LANGUAGE,
             error_detail=language,
         )
+        return PipelineResult(
+            job_id=job.id,
+            state=job.state,
+            last_stage=PipelineStage.DETECT_LANGUAGE,
+            quality=QualityReport(),
+            media_seconds=duration,
+        )
+    if stop_after is PipelineStage.DETECT_LANGUAGE:
         return PipelineResult(
             job_id=job.id,
             state=job.state,

@@ -10,7 +10,7 @@ import fcntl
 import json
 import sqlite3
 import uuid
-from collections.abc import Iterator, Mapping
+from collections.abc import Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import asdict
 from datetime import UTC, datetime, timedelta
@@ -22,11 +22,14 @@ from .config import AppConfig
 from .domain import (
     DB_SCHEMA_VERSION,
     ArtifactRecord,
+    DubSegment,
+    DubSegmentReviewState,
     ErrorCode,
     EventLevel,
     JobClaim,
     JobEvent,
     JobExecutionScope,
+    JobKind,
     JobMetrics,
     JobRecord,
     JobState,
@@ -42,6 +45,7 @@ from .domain import (
     TranslationCacheEntry,
     canonical_json,
     infer_execution_scope,
+    infer_job_kind,
 )
 from .logging_setup import event_payload
 from .states import ensure_transition
@@ -146,11 +150,14 @@ class SqliteJobRepository:
         preview_seconds: Seconds | None = None,
         preview_offset_seconds: Seconds | None = None,
         target_language: str | None = None,
+        job_kind: JobKind | None = None,
+        dubbing_profile: str | None = None,
     ) -> JobRecord:
         now = datetime.now(tz=UTC)
         fingerprint_json = _fingerprint_json(fingerprint)
         job_id = str(uuid.uuid4())
         scope = infer_execution_scope(preview_seconds=preview_seconds)
+        kind = infer_job_kind(job_kind)
         with self._transaction(immediate=True):
             if scope is JobExecutionScope.FULL:
                 existing = (
@@ -160,6 +167,7 @@ class SqliteJobRepository:
                     SELECT * FROM jobs
                     WHERE root_id = ? AND relative_path = ? AND fingerprint = ?
                           AND pipeline_config_hash = ? AND execution_scope = ?
+                          AND job_kind = ?
                     """,
                         (
                             fingerprint.root_id,
@@ -167,6 +175,7 @@ class SqliteJobRepository:
                             fingerprint_json,
                             pipeline_config_hash,
                             str(scope),
+                            str(kind),
                         ),
                     )
                     .fetchone()
@@ -180,8 +189,8 @@ class SqliteJobRepository:
                     state, current_stage, priority, attempt_count, created_at, updated_at,
                     source_language_override, audio_stream_index_override,
                     preview_seconds, preview_offset_seconds, execution_scope,
-                    target_language
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?, ?)
+                    target_language, job_kind, dubbing_profile
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     job_id,
@@ -200,6 +209,8 @@ class SqliteJobRepository:
                     preview_offset_seconds,
                     str(scope),
                     target_language,
+                    str(kind),
+                    dubbing_profile,
                 ),
             )
         job = self.get_job(job_id)
@@ -346,6 +357,62 @@ class SqliteJobRepository:
         updated = self.require_job(job_id)
         return updated
 
+    def list_dub_segments(
+        self, *, job_id: str, revision: int | None = None
+    ) -> tuple[DubSegment, ...]:
+        connection = self._connection_or_raise()
+        if revision is None:
+            row = connection.execute(
+                "SELECT max(revision) AS revision FROM dub_segments WHERE job_id = ?",
+                (job_id,),
+            ).fetchone()
+            if row is None or row["revision"] is None:
+                return ()
+            revision = int(row["revision"])
+        rows = connection.execute(
+            """
+            SELECT * FROM dub_segments
+            WHERE job_id = ? AND revision = ?
+            ORDER BY start_seconds, id
+            """,
+            (job_id, revision),
+        ).fetchall()
+        return tuple(_dub_segment_from_row(row) for row in rows)
+
+    def replace_dub_plan(
+        self, *, job_id: str, revision: int, segments: Sequence[DubSegment]
+    ) -> tuple[DubSegment, ...]:
+        now = datetime.now(tz=UTC)
+        with self._transaction(immediate=True):
+            self._connection_or_raise().execute(
+                "DELETE FROM dub_segments WHERE job_id = ? AND revision = ?",
+                (job_id, revision),
+            )
+            for segment in segments:
+                self._connection_or_raise().execute(
+                    """
+                    INSERT INTO dub_segments (
+                        id, job_id, revision, start_seconds, end_seconds,
+                        original_text, translated_text, adapted_text,
+                        speaker_id, review_state, updated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        segment.segment_id,
+                        job_id,
+                        revision,
+                        segment.start_seconds,
+                        segment.end_seconds,
+                        segment.original_text,
+                        segment.translated_text,
+                        segment.adapted_text,
+                        segment.speaker_id,
+                        str(segment.review_state),
+                        _iso(now),
+                    ),
+                )
+        return self.list_dub_segments(job_id=job_id, revision=revision)
+
     def approve_job(self, *, job_id: str) -> JobRecord:
         """Record the approval timestamp and move to ``ready_to_publish``."""
         job = self.require_job(job_id)
@@ -382,8 +449,9 @@ class SqliteJobRepository:
                 """
                 INSERT INTO artifacts (
                     job_id, stage, chunk_index, path, sha256,
-                    schema_version, stage_config_hash, created_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    schema_version, stage_config_hash, created_at,
+                    segment_id, revision
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     artifact.job_id,
@@ -394,6 +462,8 @@ class SqliteJobRepository:
                     artifact.schema_version,
                     artifact.stage_config_hash,
                     _iso(now),
+                    artifact.segment_id,
+                    artifact.revision,
                 ),
             )
             artifact_id = int(cursor.lastrowid or 0)
@@ -405,6 +475,8 @@ class SqliteJobRepository:
             schema_version=artifact.schema_version,
             stage_config_hash=artifact.stage_config_hash,
             chunk_index=artifact.chunk_index,
+            segment_id=artifact.segment_id,
+            revision=artifact.revision,
             created_at=now,
             id=artifact_id,
         )
@@ -769,12 +841,22 @@ def _job_from_row(row: sqlite3.Row) -> JobRecord:
         approved_at=_optional_datetime(row["approved_at"]),
         execution_scope=_execution_scope_from_row(row),
         target_language=_optional_target_language(row),
+        job_kind=_optional_job_kind(row),
+        dubbing_profile=_optional_text(row, "dubbing_profile"),
     )
 
 
 def _optional_target_language(row: sqlite3.Row) -> str | None:
+    return _optional_text(row, "target_language")
+
+
+def _optional_job_kind(row: sqlite3.Row) -> JobKind:
+    return infer_job_kind(_optional_text(row, "job_kind"))
+
+
+def _optional_text(row: sqlite3.Row, column: str) -> str | None:
     try:
-        stored = row["target_language"]
+        stored = row[column]
     except IndexError:
         return None
     if stored is None:
@@ -801,8 +883,35 @@ def _artifact_from_row(row: sqlite3.Row) -> ArtifactRecord:
         schema_version=row["schema_version"],
         stage_config_hash=row["stage_config_hash"],
         chunk_index=row["chunk_index"],
+        segment_id=_optional_text(row, "segment_id"),
+        revision=_optional_int(row, "revision"),
         created_at=_parse_datetime(row["created_at"]),
         id=row["id"],
+    )
+
+
+def _optional_int(row: sqlite3.Row, column: str) -> int | None:
+    try:
+        stored = row[column]
+    except IndexError:
+        return None
+    if stored is None:
+        return None
+    return int(stored)
+
+
+def _dub_segment_from_row(row: sqlite3.Row) -> DubSegment:
+    return DubSegment(
+        segment_id=str(row["id"]),
+        job_id=str(row["job_id"]),
+        revision=int(row["revision"]),
+        start_seconds=float(row["start_seconds"]),
+        end_seconds=float(row["end_seconds"]),
+        original_text=str(row["original_text"] or ""),
+        translated_text=str(row["translated_text"] or ""),
+        adapted_text=str(row["adapted_text"] or ""),
+        speaker_id=_optional_text(row, "speaker_id"),
+        review_state=DubSegmentReviewState(str(row["review_state"])),
     )
 
 

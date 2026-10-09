@@ -66,12 +66,15 @@ flowchart TD
 | `api.py` | Operator actions over the repository; used by the dashboard, not by the worker |
 | `dashboard.py` | Optional LAN HTTP server and static UI; a separate process from the daemon |
 | `webhooks.py` | Optional Sonarr/Radarr listener; maps import paths and calls `enqueue_path` |
+| `dubbing.py` | Dubbing enqueue, speech-plan persistence, and the dubbing stage window |
 
 The engines sit behind `Protocol`s in `domain.py`: `MediaProbe`,
-`AudioExtractor`, `Transcriber`, `Translator`, `SubtitleRenderer` and
-`JobRepository`. Tests inject fakes. Replacing the translator does not
+`AudioExtractor`, `Transcriber`, `Translator`, `SubtitleRenderer`,
+`DialogueSeparator`, `SpeechSynthesizer`, `TimelineRenderer`, `AudioMixer`
+and `JobRepository`. Tests inject fakes. Replacing the translator does not
 require touching the queue or the output code. There is deliberately no
-generic plugin system.
+generic plugin system. Subtitle and dubbing jobs share the queue but not
+a uniqueness row (`job_kind`).
 
 ## Time and chunk ownership
 

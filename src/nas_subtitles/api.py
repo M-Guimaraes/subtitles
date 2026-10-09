@@ -16,7 +16,6 @@ from typing import Literal, Protocol
 from .config import AppConfig
 from .discovery import ScanSummary, scan
 from .domain import (
-    PIPELINE_STAGE_ORDER,
     ArtifactRecord,
     ErrorCode,
     JobEvent,
@@ -26,6 +25,8 @@ from .domain import (
     JobState,
     NasSubtitlesError,
     PipelineStage,
+    infer_job_kind,
+    stages_for,
 )
 from .health import HealthReport, check_health
 from .output import read_manifest_payload
@@ -295,6 +296,8 @@ def job_summary(
         "detection_probability": probability,
         "source_language_confident": resolved.get("source_language_confident"),
         "target_language": target,
+        "job_kind": str(infer_job_kind(job.job_kind)),
+        "dubbing_profile": job.dubbing_profile,
         "selected_audio_stream_index": resolved.get("selected_audio_stream_index")
         or job.audio_stream_index_override
         or job.fingerprint.audio_stream_index,
@@ -344,7 +347,7 @@ def _stage_progress(job: JobRecord) -> list[dict[str, object]]:
     current = job.current_stage
     reached = False
     rows: list[dict[str, object]] = []
-    for stage in PIPELINE_STAGE_ORDER:
+    for stage in stages_for(job.job_kind):
         status: Literal["pending", "current", "done"]
         if current is None:
             status = "pending"

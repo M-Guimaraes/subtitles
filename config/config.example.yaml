@@ -73,3 +73,10 @@ webhooks:
   # path_maps:
   #   - host_prefix: /nas/media
   #     container_prefix: /media
+dubbing:
+  # cpu-fixed is the MVP voice. mac-clone is experimental and not installed yet.
+  profile: cpu-fixed
+  target_language: pt-BR
+  voice: pt_BR-faber-medium
+  min_speed: 0.90
+  max_speed: 1.15

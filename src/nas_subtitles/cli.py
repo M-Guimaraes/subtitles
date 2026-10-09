@@ -27,17 +27,20 @@ from typing import Literal
 
 import typer
 
-from . import dashboard, discovery, models, output, repository, webhooks, worker
+from . import dashboard, discovery, dubbing, models, output, repository, webhooks, worker
 from .config import DEFAULT_CONFIG_PATH, AppConfig, load_config
 from .domain import (
     ErrorCode,
     ExitCode,
+    JobKind,
     JobRecord,
     JobState,
     NasSubtitlesError,
+    PipelineStage,
     PublishMode,
     PublishOutcome,
     exit_code_for,
+    infer_job_kind,
 )
 from .health import check_health
 from .logging_setup import configure_logging
@@ -64,8 +67,12 @@ app = typer.Typer(
 )
 models_app = typer.Typer(no_args_is_help=True, help="Install and verify the local models.")
 jobs_app = typer.Typer(no_args_is_help=True, help="Inspect and steer queued jobs.")
+dub_app = typer.Typer(no_args_is_help=True, help="Generate local pt-BR dubbed audio.")
+dub_plan_app = typer.Typer(no_args_is_help=True, help="Export or apply a dubbed speech plan.")
 app.add_typer(models_app, name="models")
 app.add_typer(jobs_app, name="jobs")
+app.add_typer(dub_app, name="dub")
+dub_app.add_typer(dub_plan_app, name="plan")
 
 
 # --------------------------------------------------------------------------- #
@@ -255,6 +262,24 @@ def _doctor_checks(config: AppConfig) -> list[DoctorCheck]:
                 "atomic_publish",
                 "fail",
                 "exclusive hard-link publish is not supported on output_dir",
+            )
+        )
+
+    piper_voice = config.tts_models_dir / config.dubbing.voice
+    if piper_voice.exists():
+        checks.append(
+            DoctorCheck(
+                "dubbing",
+                "ok",
+                f"profile={config.dubbing.profile} voice={config.dubbing.voice}",
+            )
+        )
+    else:
+        checks.append(
+            DoctorCheck(
+                "dubbing",
+                "pending",
+                "synthesis models are not installed; nas-subs dub process needs them later",
             )
         )
     return checks
@@ -586,6 +611,155 @@ def enqueue(
             },
             as_json=json_output,
             text=f"{first.id} {first.state}",
+        )
+
+
+@dub_app.command("process")
+def dub_process(
+    path: Path = typer.Argument(..., help="Video file inside a configured media root."),
+    preview_seconds: int | None = typer.Option(
+        None, "--preview-seconds", help="Dub only this many seconds, into staging."
+    ),
+    preview_offset_seconds: int = typer.Option(
+        0, "--preview-offset-seconds", help="Where the preview window starts."
+    ),
+    source_language: str | None = typer.Option(
+        None, "--source-language", help="Skip detection and force the source language."
+    ),
+    audio_stream_index: int | None = typer.Option(
+        None,
+        "--audio-stream-index",
+        help="Global ffprobe stream index, not the relative a:N ordinal.",
+    ),
+    profile: str | None = typer.Option(
+        None, "--profile", help="cpu-fixed (MVP) or mac-clone (experimental)."
+    ),
+    stop_after: str | None = typer.Option(
+        None, "--stop-after", help="Stop after this pipeline stage (probe, extract, ...)."
+    ),
+    config_path: Path = _CONFIG_OPTION,
+    json_output: bool = _JSON_OPTION,
+) -> None:
+    """Enqueue and run one dubbing job. Existing subtitles do not skip this."""
+    with _handled(as_json=json_output):
+        config = _load(config_path)
+        repo = repository.open_repository(config)
+        resolved_profile = dubbing.parse_dubbing_profile(profile or config.dubbing.profile)
+        stop_stage = _optional_stage(stop_after)
+        with repository.StateDirLock(config.lock_path):
+            queued = dubbing.enqueue_dubbing(
+                config,
+                repo,
+                path,
+                source_language=source_language,
+                audio_stream_index=audio_stream_index,
+                preview_seconds=None if preview_seconds is None else float(preview_seconds),
+                preview_offset_seconds=float(preview_offset_seconds),
+                profile=resolved_profile,
+                require_stability=preview_seconds is None,
+            )
+            from .pipeline import build_context, run_job
+
+            result = run_job(
+                build_context(config, repo, queued.job),
+                stop_after=stop_stage,
+            )
+            _emit(
+                {
+                    "ok": True,
+                    "job_id": result.job_id,
+                    "state": str(result.state),
+                    "job_kind": str(JobKind.DUBBING),
+                    "profile": str(resolved_profile),
+                    "preview": queued.job.preview_seconds is not None,
+                    "output": str(result.output_path) if result.output_path else None,
+                    "last_stage": str(result.last_stage),
+                },
+                as_json=json_output,
+                text=f"{result.job_id} {result.state} kind=dubbing",
+            )
+
+
+@dub_app.command("enqueue")
+def dub_enqueue(
+    path: Path = typer.Argument(..., help="Video file inside a configured media root."),
+    source_language: str | None = typer.Option(None, "--source-language"),
+    audio_stream_index: int | None = typer.Option(None, "--audio-stream-index"),
+    profile: str | None = typer.Option(None, "--profile"),
+    priority: int = typer.Option(0, "--priority", help="Higher runs first."),
+    config_path: Path = _CONFIG_OPTION,
+    json_output: bool = _JSON_OPTION,
+) -> None:
+    """Add one dubbing job to the queue. Existing subtitles do not skip this."""
+    with _handled(as_json=json_output):
+        config = _load(config_path)
+        repo = repository.open_repository(config)
+        queued = dubbing.enqueue_dubbing(
+            config,
+            repo,
+            path,
+            source_language=source_language,
+            audio_stream_index=audio_stream_index,
+            priority=priority,
+            profile=profile or config.dubbing.profile,
+        )
+        _emit(
+            {
+                "ok": True,
+                "enqueued": True,
+                "job": _job_payload(queued.job),
+            },
+            as_json=json_output,
+            text=f"{queued.job.id} {queued.job.state} kind=dubbing",
+        )
+
+
+@dub_plan_app.command("export")
+def dub_plan_export(
+    job_id: str = typer.Argument(..., help="Dubbing job identifier."),
+    destination: Path = typer.Option(..., "--output", help="JSON file to create, never overwrite."),
+    config_path: Path = _CONFIG_OPTION,
+    json_output: bool = _JSON_OPTION,
+) -> None:
+    """Write the latest speech plan. Fails with output_conflict if the file exists."""
+    with _handled(as_json=json_output):
+        config = _load(config_path)
+        repo = repository.open_repository(config)
+        job, written = dubbing.export_plan(repo, job_id, destination=destination)
+        segments = repo.list_dub_segments(job_id=job.id)
+        _emit(
+            {
+                "ok": True,
+                "job_id": job.id,
+                "output": str(written),
+                "revision": segments[0].revision if segments else 0,
+            },
+            as_json=json_output,
+            text=f"{job.id} plan -> {written}",
+        )
+
+
+@dub_plan_app.command("apply")
+def dub_plan_apply(
+    job_id: str = typer.Argument(..., help="Dubbing job identifier."),
+    source: Path = typer.Option(..., "--input", help="Edited plan JSON."),
+    config_path: Path = _CONFIG_OPTION,
+    json_output: bool = _JSON_OPTION,
+) -> None:
+    """Validate and store the next revision of a speech plan."""
+    with _handled(as_json=json_output):
+        config = _load(config_path)
+        repo = repository.open_repository(config)
+        job, segments = dubbing.apply_plan(repo, job_id, source=source)
+        _emit(
+            {
+                "ok": True,
+                "job_id": job.id,
+                "revision": segments[0].revision if segments else 0,
+                "segments": len(segments),
+            },
+            as_json=json_output,
+            text=f"{job.id} plan revision={segments[0].revision if segments else 0}",
         )
 
 
@@ -971,6 +1145,19 @@ def backup(
 # --------------------------------------------------------------------------- #
 
 
+def _optional_stage(value: str | None) -> PipelineStage | None:
+    if value is None or value.strip() == "":
+        return None
+    try:
+        return PipelineStage(value.strip())
+    except ValueError as exc:
+        raise NasSubtitlesError(
+            f"unknown pipeline stage {value!r}",
+            code=ErrorCode.CONFIG_INVALID,
+            detail={"stage": value},
+        ) from exc
+
+
 def _job_payload(record: JobRecord) -> dict[str, object]:
     return {
         "id": record.id,
@@ -984,6 +1171,8 @@ def _job_payload(record: JobRecord) -> dict[str, object]:
         "approved_at": record.approved_at.isoformat() if record.approved_at else None,
         "output_path": str(record.output_path) if record.output_path else None,
         "target_language": record.target_language,
+        "job_kind": str(infer_job_kind(record.job_kind)),
+        "dubbing_profile": record.dubbing_profile,
     }
 
 

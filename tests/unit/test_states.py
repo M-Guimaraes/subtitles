@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from nas_subtitles.domain import ErrorCode, JobState, NasSubtitlesError, PipelineStage
+from nas_subtitles.domain import ErrorCode, JobKind, JobState, NasSubtitlesError, PipelineStage
 from nas_subtitles.states import (
     can_transition,
     ensure_transition,
@@ -57,6 +57,8 @@ def test_forbidden_transition_raises_invalid_state() -> None:
 def test_next_stage_walks_the_pipeline() -> None:
     assert next_stage(PipelineStage.PROBE) is PipelineStage.DETECT_LANGUAGE
     assert next_stage(PipelineStage.PUBLISH) is None
+    assert next_stage(PipelineStage.SEPARATE, job_kind=JobKind.DUBBING) is PipelineStage.TRANSCRIBE
+    assert next_stage(PipelineStage.PUBLISH, job_kind=JobKind.DUBBING) is None
 
 
 def test_permission_and_conflict_are_not_retryable() -> None:

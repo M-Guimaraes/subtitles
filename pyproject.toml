@@ -38,6 +38,9 @@ packages = ["src/nas_subtitles"]
 
 [tool.hatch.build.targets.wheel.force-include]
 "src/nas_subtitles/migrations/001_initial.sql" = "nas_subtitles/migrations/001_initial.sql"
+"src/nas_subtitles/migrations/002_execution_scope.sql" = "nas_subtitles/migrations/002_execution_scope.sql"
+"src/nas_subtitles/migrations/003_target_language.sql" = "nas_subtitles/migrations/003_target_language.sql"
+"src/nas_subtitles/migrations/004_job_kind.sql" = "nas_subtitles/migrations/004_job_kind.sql"
 "src/nas_subtitles/static/index.html" = "nas_subtitles/static/index.html"
 "src/nas_subtitles/static/dashboard.css" = "nas_subtitles/static/dashboard.css"
 "src/nas_subtitles/static/dashboard.js" = "nas_subtitles/static/dashboard.js"

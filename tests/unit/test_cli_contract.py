@@ -38,6 +38,10 @@ DOCUMENTED_COMMANDS: tuple[tuple[str, ...], ...] = (
     ("backup",),
     ("dashboard",),
     ("webhooks",),
+    ("dub", "process"),
+    ("dub", "enqueue"),
+    ("dub", "plan", "export"),
+    ("dub", "plan", "apply"),
 )
 
 

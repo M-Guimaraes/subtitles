@@ -80,6 +80,7 @@ parallel work does not collide. Changing a shared contract means changing
 | 8. delivery | `docs/`, Compose overrides, `doctor` checks in `cli.py` | everything else |
 | 003. dashboard | `api.py`, `dashboard.py`, `static/` | worker/pipeline internals |
 | 004. webhooks | `webhooks.py`, `compose.webhooks.yaml` | worker/pipeline internals |
+| 006. dubbing | `dubbing.py`, `migrations/004_job_kind.sql`, dubbing half of `models.py`/`cli.py` | subtitle engine internals |
 
 Shared, owned by stage 1, consumed by all: `domain.py` (protocols, enums,
 value objects, `ExitCode`) and `config.py` (`AppConfig`,
