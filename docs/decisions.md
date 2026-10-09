@@ -144,5 +144,7 @@ promise about how long the whole library will take.
 OCR and PGS, diarization, subtitle providers, translating downloaded
 subtitles, GPU, multiple workers, LLM translation, Redis, PostgreSQL,
 Celery, Kubernetes. A LAN dashboard exists as a separate process and is not
+required for processing. Sonarr/Radarr webhooks are another optional
+process; they only enqueue through the existing discovery path and are not
 required for processing. No changes to ZFS, the USB enclosure,
 `~/nas-stack`, Bazarr, Jellyfin or any existing container.

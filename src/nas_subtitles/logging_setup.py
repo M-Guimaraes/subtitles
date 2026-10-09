@@ -32,7 +32,18 @@ __all__ = [
 
 REDACTED = "[redacted]"
 
-_SENSITIVE_KEYS = frozenset({"text", "speech", "transcript", "translation", "path", "filename"})
+_SENSITIVE_KEYS = frozenset(
+    {
+        "text",
+        "speech",
+        "transcript",
+        "translation",
+        "path",
+        "filename",
+        "token",
+        "webhook_token",
+    }
+)
 """Keys that would leak speech or personal paths if logged verbatim."""
 
 _RESERVED_RECORD_KEYS = frozenset(

@@ -1,0 +1,51 @@
+# Optional Sonarr/Radarr webhook listener. Separate service from the worker
+# so stopping this container never stops background processing or the
+# dashboard.
+#
+#   docker compose -f compose.yaml -f compose.offline.yaml -f compose.webhooks.yaml up -d
+#
+# The published port is host loopback only. NAS_SUBS_WEBHOOK_TOKEN is
+# required; the process refuses to start without it. Do not change the
+# publish to a public address.
+services:
+  webhooks:
+    build: .
+    image: nas-subtitles:local
+    user: "${APP_UID:-1000}:${APP_GID:-1000}"
+    init: true
+    restart: unless-stopped
+    command:
+      [
+        nas-subs,
+        webhooks,
+        --host,
+        0.0.0.0,
+        --port,
+        "8788",
+        --config,
+        /config/config.yaml,
+      ]
+    environment:
+      HOME: /models/home
+      XDG_CONFIG_HOME: /models/config
+      HF_HUB_OFFLINE: "1"
+      XDG_DATA_HOME: /models/xdg
+      XDG_CACHE_HOME: /models/cache
+      HF_HOME: /models/huggingface
+      NAS_SUBS_WEBHOOK_TOKEN: ${NAS_SUBS_WEBHOOK_TOKEN:-}
+    ports:
+      - "127.0.0.1:8788:8788"
+    volumes:
+      - type: bind
+        source: ${MEDIA_HOST_PATH:-/nas/media}
+        target: /media
+        read_only: true
+        bind:
+          create_host_path: false
+      - ./config/config.yaml:/config/config.yaml:ro
+      - ./data/state:/state
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"

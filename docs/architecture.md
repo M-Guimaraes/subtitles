@@ -5,7 +5,11 @@
 One worker process, `nas-subs daemon`. The worker does both the periodic scan
 and the job processing; there is no second scanner daemon. The optional
 dashboard is a separate process (`nas-subs dashboard`) that reads the same
-SQLite queue and never takes `worker.lock`. One job runs at a time,
+SQLite queue and never takes `worker.lock`. Sonarr/Radarr webhooks are
+another separate process (`nas-subs webhooks`) that maps an import path
+onto a configured root and calls the same `enqueue_path` used by a scan.
+Stopping either HTTP process leaves the daemon scanning and processing.
+One job runs at a time,
 guarded by a `flock` on `state_dir` (exit code 6 when it is already held) and
 by a `BEGIN IMMEDIATE` claim in SQLite so two processes can never lease the
 same job. Inference never holds the database lock. A heartbeat thread writes
@@ -13,7 +17,9 @@ every 30 s so a slow job is distinguishable from a dead worker.
 
 ```mermaid
 flowchart TD
-  scan[Stable scan] --> queued[queued]
+  webhook[Sonarr/Radarr webhook] --> enqueue[enqueue_path]
+  scan[Stable scan] --> enqueue
+  enqueue --> queued[queued]
   queued --> claim[Claim and lease]
   claim --> probe[probe]
   probe --> detect[detect_language]
@@ -57,6 +63,7 @@ flowchart TD
 | `pipeline.py` | Stage orchestration with checkpoint reuse |
 | `api.py` | Operator actions over the repository; used by the dashboard, not by the worker |
 | `dashboard.py` | Optional LAN HTTP server and static UI; a separate process from the daemon |
+| `webhooks.py` | Optional Sonarr/Radarr listener; maps import paths and calls `enqueue_path` |
 
 The engines sit behind `Protocol`s in `domain.py`: `MediaProbe`,
 `AudioExtractor`, `Transcriber`, `Translator`, `SubtitleRenderer` and

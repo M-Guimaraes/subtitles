@@ -27,7 +27,7 @@ from typing import Literal
 
 import typer
 
-from . import dashboard, discovery, models, output, repository, worker
+from . import dashboard, discovery, models, output, repository, webhooks, worker
 from .config import DEFAULT_CONFIG_PATH, AppConfig, load_config
 from .domain import (
     ErrorCode,
@@ -210,6 +210,35 @@ def _doctor_checks(config: AppConfig) -> list[DoctorCheck]:
         if bind.requires_token:
             detail += ", token configured"
         checks.append(DoctorCheck("dashboard", "ok", detail))
+
+    try:
+        webhook_bind = webhooks.resolve_webhook_bind(config)
+    except NasSubtitlesError:
+        checks.append(
+            DoctorCheck(
+                "webhooks",
+                "warn",
+                "webhook token is not configured; nas-subs webhooks will refuse to start",
+            )
+        )
+    else:
+        if webhook_bind.public_bind:
+            checks.append(
+                DoctorCheck(
+                    "webhooks",
+                    "warn",
+                    "webhooks.bind is a public address; keep the Compose publish on loopback "
+                    "and do not expose this port on the internet",
+                )
+            )
+        else:
+            checks.append(
+                DoctorCheck(
+                    "webhooks",
+                    "ok",
+                    f"{webhook_bind.host}:{webhook_bind.port}, token configured",
+                )
+            )
 
     try:
         verified = models.verify_models(config, offline=True)
@@ -577,6 +606,34 @@ def dashboard_command(
             text=f"dashboard on {bind.host}:{bind.port}",
         )
         dashboard.serve_dashboard(config, repo, host=bind.host, port=bind.port, token=bind.token)
+
+
+@app.command("webhooks")
+def webhooks_command(
+    host: str | None = typer.Option(
+        None, "--host", help="Override webhooks.bind. Defaults to loopback."
+    ),
+    port: int | None = typer.Option(None, "--port", help="Override webhooks.port."),
+    config_path: Path = _CONFIG_OPTION,
+    json_output: bool = _JSON_OPTION,
+) -> None:
+    """Listen for Sonarr/Radarr import events. Does not process jobs or take the worker lock."""
+    with _handled(as_json=json_output):
+        config = _load(config_path)
+        repo = repository.open_repository(config)
+        bind = webhooks.resolve_webhook_bind(config, host=host, port=port)
+        _emit(
+            {
+                "ok": True,
+                "bind": bind.host,
+                "port": bind.port,
+                "auth_required": True,
+                "worker_independent": True,
+            },
+            as_json=json_output,
+            text=f"webhooks on {bind.host}:{bind.port}",
+        )
+        webhooks.serve_webhooks(config, repo, host=bind.host, port=bind.port, token=bind.token)
 
 
 @app.command()

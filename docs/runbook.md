@@ -203,6 +203,31 @@ docker compose -f compose.yaml -f compose.offline.yaml -f compose.dashboard.yaml
 uv run nas-subs dashboard --config /absolute/path/to/config/config.yaml
 ```
 
+Sonarr/Radarr webhooks are a third process. Set `NAS_SUBS_WEBHOOK_TOKEN` in
+`.env`, then add `compose.webhooks.yaml`. The listener binds inside the
+container on `0.0.0.0:8788` and is published on host loopback only
+(`127.0.0.1:8788`). Stopping that container does not stop the worker. The
+periodic scan remains the source of truth: a missed or rejected webhook is
+picked up on the next reconciliation pass.
+
+```bash
+docker compose -f compose.yaml -f compose.offline.yaml -f compose.webhooks.yaml up -d
+uv run nas-subs webhooks --config /absolute/path/to/config/config.yaml
+```
+
+In Sonarr or Radarr: Connect → Webhook → POST to
+`http://127.0.0.1:8788/hooks/sonarr` or `/hooks/radarr` (or `/hooks`).
+Enable On Import / On Upgrade (`Download`). Send the shared secret as
+`Authorization: Bearer <token>` or `X-Api-Key: <token>`. If Sonarr or
+Radarr reports host paths that differ from the container `media_roots`,
+add a `webhooks.path_maps` prefix rewrite. Unsupported events are ignored;
+malformed or unauthenticated requests fail closed and enqueue nothing.
+
+If Sonarr or Radarr runs in another container, `127.0.0.1` inside that
+container is not this host. Use a shared Docker network and the service
+name `webhooks`, or another documented LAN address. Do not publish the
+webhook port beyond loopback unless you understand the exposure.
+
 For zero-touch sidecar publishing, add `compose.sidecar.yaml` and set
 `publish_mode: sidecar` as in section 9.
 

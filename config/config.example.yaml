@@ -58,3 +58,15 @@ subtitles:
 dashboard:
   bind: 127.0.0.1
   port: 8787
+webhooks:
+  bind: 127.0.0.1
+  port: 8788
+  # Shared secret required at runtime. Prefer NAS_SUBS_WEBHOOK_TOKEN in .env
+  # over writing the token into this file. Unauthenticated webhooks are refused.
+  # token: null
+  # Sonarr/Radarr often report host paths that differ from container mounts.
+  # Each map is a prefix replacement; the result must still fall inside media_roots.
+  path_maps: []
+  # path_maps:
+  #   - host_prefix: /nas/media
+  #     container_prefix: /media

@@ -41,10 +41,13 @@ def test_speech_and_paths_are_never_logged_verbatim() -> None:
     payload = _capture(
         text="the entire spoken sentence",
         path="/Users/someone/Movies/Private.mkv",
+        token="super-secret-token",
     )
     assert payload["text"] == REDACTED
     assert payload["path"] == REDACTED
+    assert payload["token"] == REDACTED
     assert "Private" not in json.dumps(payload)
+    assert "super-secret-token" not in json.dumps(payload)
 
 
 def test_path_token_is_stable_and_not_reversible() -> None:

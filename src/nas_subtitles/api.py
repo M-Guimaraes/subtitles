@@ -233,6 +233,18 @@ class DashboardService:
                 "port": self.config.dashboard.port,
                 "token_configured": bool(self.config.dashboard.token),
             },
+            "webhooks": {
+                "bind": self.config.webhooks.bind,
+                "port": self.config.webhooks.port,
+                "token_configured": bool(self.config.webhooks.token),
+                "path_maps": [
+                    {
+                        "host_prefix": str(item.host_prefix),
+                        "container_prefix": str(item.container_prefix),
+                    }
+                    for item in self.config.webhooks.path_maps
+                ],
+            },
         }
 
     def _job_payload(

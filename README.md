@@ -81,6 +81,15 @@ worker. The published port is host loopback only:
 docker compose -f compose.yaml -f compose.offline.yaml -f compose.dashboard.yaml up -d
 ```
 
+Sonarr/Radarr import webhooks are a third container. They only enqueue
+through the same scan path; the periodic scan stays the correctness
+fallback. Set `NAS_SUBS_WEBHOOK_TOKEN` first. The published port is host
+loopback only. Stopping this container does not stop the worker:
+
+```bash
+docker compose -f compose.yaml -f compose.offline.yaml -f compose.webhooks.yaml up -d
+```
+
 The full sequence, including the scanner dry run and the pilot, is in
 [docs/runbook.md](docs/runbook.md).
 
@@ -103,6 +112,7 @@ nas-subs health              heartbeat and database check, used by Docker
 nas-subs cleanup             remove stale intermediates inside work_dir
 nas-subs backup              consistent backup of config, manifest and database
 nas-subs dashboard           optional LAN UI; does not process jobs
+nas-subs webhooks            Sonarr/Radarr import listener; does not process jobs
 ```
 
 Every command accepts `--json` and none of them prompts. Exit codes: `0`
