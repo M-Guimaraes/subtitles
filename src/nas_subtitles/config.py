@@ -52,6 +52,8 @@ __all__ = [
     "MediaRoot",
     "SubtitlesConfig",
     "TranslationConfig",
+    "WebhookPathMap",
+    "WebhooksConfig",
     "WorkerConfig",
     "load_config",
     "root_id_for",
@@ -323,6 +325,60 @@ class DashboardConfig(BaseModel):
         return stripped or None
 
 
+class WebhookPathMap(BaseModel):
+    """Rewrite a Sonarr/Radarr host path onto a configured container root.
+
+    Payloads often carry the *host* library path. Mapping is a prefix
+    replacement only; the result must still fall inside ``media_roots``.
+    """
+
+    model_config = _STRICT
+
+    host_prefix: Path
+    container_prefix: Path
+
+    @field_validator("host_prefix", "container_prefix")
+    @classmethod
+    def _absolute_prefix(cls, value: Path) -> Path:
+        if not value.is_absolute():
+            raise ValueError("webhooks.path_maps prefixes must be absolute paths")
+        if ".." in value.parts:
+            raise ValueError("webhooks.path_maps prefixes must not contain '..'")
+        return value
+
+
+class WebhooksConfig(BaseModel):
+    """Listen address for the optional Sonarr/Radarr webhook listener.
+
+    Defaults bind loopback only. Bind, port, token and path maps are not
+    part of the pipeline hash: changing them must not invalidate jobs.
+    A token is required at runtime; unauthenticated webhooks are refused.
+    """
+
+    model_config = _STRICT
+
+    bind: str = "127.0.0.1"
+    port: int = Field(default=8788, ge=1, le=65535)
+    token: str | None = None
+    path_maps: tuple[WebhookPathMap, ...] = ()
+
+    @field_validator("bind")
+    @classmethod
+    def _bind_not_empty(cls, value: str) -> str:
+        stripped = value.strip()
+        if not stripped:
+            raise ValueError("webhooks.bind must be a host address")
+        return stripped
+
+    @field_validator("token")
+    @classmethod
+    def _token_optional_in_file(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        stripped = value.strip()
+        return stripped or None
+
+
 class SubtitlesConfig(BaseModel):
     model_config = _STRICT
 
@@ -365,6 +421,7 @@ class AppConfig(BaseModel):
     translation: TranslationConfig = Field(default_factory=TranslationConfig)
     subtitles: SubtitlesConfig = Field(default_factory=SubtitlesConfig)
     dashboard: DashboardConfig = Field(default_factory=DashboardConfig)
+    webhooks: WebhooksConfig = Field(default_factory=WebhooksConfig)
 
     # -- validation -------------------------------------------------------- #
 

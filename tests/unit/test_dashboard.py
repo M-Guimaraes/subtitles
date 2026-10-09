@@ -137,6 +137,9 @@ def test_settings_are_read_only_and_include_language_config(config: AppConfig) -
     assert payload["asr_model"] == "small"
     assert payload["dashboard"]["bind"] == "127.0.0.1"
     assert payload["dashboard"]["token_configured"] is False
+    assert payload["webhooks"]["bind"] == "127.0.0.1"
+    assert payload["webhooks"]["port"] == 8788
+    assert payload["webhooks"]["token_configured"] is False
 
 
 def test_rescan_does_not_take_the_worker_lock(config: AppConfig) -> None:

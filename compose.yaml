@@ -3,6 +3,7 @@
 # Combine with the overrides rather than editing this file:
 #   docker compose -f compose.yaml -f compose.offline.yaml up -d
 #   docker compose -f compose.yaml -f compose.sidecar.yaml up -d
+#   docker compose -f compose.yaml -f compose.offline.yaml -f compose.webhooks.yaml up -d
 #
 # The 2 CPUs and 4 GiB below are an initial ceiling, not a measurement of what
 # the workload needs. Revisit them before the pilot and record the change.

@@ -1,6 +1,14 @@
 # 004 — Sonarr/Radarr Webhook Triggers
 
-**Status:** BACKLOG
+**Status:** IN PROGRESS
+
+## Design choice
+
+Webhooks are a dedicated `nas-subs webhooks` process and `compose.webhooks.yaml`
+service, not routes on the dashboard. Stopping the listener does not stop the
+worker or the dashboard. Import events call `discovery.enqueue_path` (stability
+is not re-applied; Sonarr/Radarr already finished the import). A shared secret
+is required. Bind defaults to loopback. Periodic scan remains the fallback.
 
 ## Goal
 

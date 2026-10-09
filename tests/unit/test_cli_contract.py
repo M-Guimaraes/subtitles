@@ -37,6 +37,7 @@ DOCUMENTED_COMMANDS: tuple[tuple[str, ...], ...] = (
     ("cleanup",),
     ("backup",),
     ("dashboard",),
+    ("webhooks",),
 )
 
 
