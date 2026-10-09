@@ -91,18 +91,26 @@ class SrtSubtitleRenderer:
 
 
 def staging_path_for(config: AppConfig, job: JobRecord) -> Path:
-    """``output_dir/<root_id>/<relative tree>/<stem>.pt-BR.srt``."""
+    """``output_dir/<root_id>/<relative tree>/<stem>.<target>.srt``."""
     relative = Path(job.relative_path)
-    return config.output_dir / job.root_id / relative.with_suffix(f".{config.target_language}.srt")
+    target = config.target_language_for_job(job.target_language)
+    return config.output_dir / job.root_id / relative.with_suffix(f".{target}.srt")
 
 
-def sidecar_path_for(config: AppConfig, root: MediaRoot, relative_path: str) -> Path:
-    """``<stem>.pt-BR.srt`` beside the video; requires ``publish_mode: sidecar``.
+def sidecar_path_for(
+    config: AppConfig,
+    root: MediaRoot,
+    relative_path: str,
+    *,
+    target_language: str | None = None,
+) -> Path:
+    """``<stem>.<target>.srt`` beside the video; requires ``publish_mode: sidecar``.
 
     Uses the public target language, never an Argos backend code such as ``pb``.
     """
     video = root.path / relative_path
-    return video.with_suffix(f".{config.target_language}.srt")
+    target = config.target_language_for_job(target_language)
+    return video.with_suffix(f".{target}.srt")
 
 
 def preview_path_for(config: AppConfig, job: JobRecord) -> Path:
@@ -205,7 +213,7 @@ def publish_exclusive(*, content: str, target: Path) -> PublishResult:
 
 def publish_job(config: AppConfig, repository: JobRepository, job: JobRecord) -> PublishResult:
     """Publish a ready job without re-running ASR or translation."""
-    from .discovery import compute_fingerprint, find_existing_subtitles, has_portuguese_subtitle
+    from .discovery import compute_fingerprint, find_existing_subtitles, has_subtitle_for_target
     from .media import FfprobeMediaProbe
     from .states import ensure_transition
 
@@ -241,13 +249,16 @@ def publish_job(config: AppConfig, repository: JobRepository, job: JobRecord) ->
             detail={"path_token": path_token(source)},
         )
     content = source.read_text(encoding="utf-8")
+    target_language = config.target_language_for_job(job.target_language)
     if config.publish_mode is PublishMode.SIDECAR:
-        if has_portuguese_subtitle(existing):
+        if has_subtitle_for_target(existing, target_language):
             raise NasSubtitlesError(
-                "a portuguese subtitle already exists beside the video",
+                f"a {target_language} subtitle already exists beside the video",
                 code=ErrorCode.OUTPUT_CONFLICT,
             )
-        target = sidecar_path_for(config, root, job.relative_path)
+        target = sidecar_path_for(
+            config, root, job.relative_path, target_language=target_language
+        )
         result = publish_exclusive(content=content, target=target)
     else:
         result = PublishResult(

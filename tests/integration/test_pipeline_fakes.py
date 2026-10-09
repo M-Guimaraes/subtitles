@@ -9,8 +9,8 @@ from threading import Event
 
 import pytest
 
-from nas_subtitles.config import AppConfig
-from nas_subtitles.discovery import enqueue_path
+from nas_subtitles.config import AppConfig, LanguagesConfig
+from nas_subtitles.discovery import enqueue_path, enqueue_targets
 from nas_subtitles.domain import (
     AudioChunk,
     ChunkTranscript,
@@ -21,6 +21,7 @@ from nas_subtitles.domain import (
     LanguageSource,
     ModelIdentity,
     ModelKind,
+    NasSubtitlesError,
     PublishMode,
     TranscriptSegment,
     TranslatedUnit,
@@ -99,7 +100,12 @@ class _FakeTranslator:
         return "fake-translator"
 
     def supports(self, *, source_language: str, target_language: str) -> bool:
-        return source_language == "en" and target_language.startswith("pt")
+        family = target_language.split("-", 1)[0]
+        if source_language == "en" and family == "pt":
+            return True
+        if source_language == "pt" and family == "en":
+            return True
+        return False
 
     def translate(self, units):
         self.calls += 1
@@ -107,7 +113,7 @@ class _FakeTranslator:
             TranslatedUnit(
                 unit_id=unit.unit_id,
                 source_text=unit.source_text,
-                translated_text="ola",
+                translated_text="hello" if unit.target_language == "en" else "ola",
                 source_language=unit.source_language,
                 target_language=unit.target_language,
                 engine_identity=self.engine_identity,
@@ -294,3 +300,99 @@ def test_low_confidence_detection_goes_to_review(config: AppConfig, media_root: 
     assert payload["source_language_confident"] is False
     assert payload["translation_executed"] is False
     assert payload["target_language"] == "pt-BR"
+
+
+def _with_targets(config: AppConfig, *targets: str) -> AppConfig:
+    return config.model_copy(
+        update={"languages": LanguagesConfig(source="auto", targets=targets, low_confidence="review")}
+    )
+
+
+class _PtOnlyTranslator(_FakeTranslator):
+    def supports(self, *, source_language: str, target_language: str) -> bool:
+        return source_language == "en" and target_language.startswith("pt")
+
+
+def test_two_targets_write_two_language_specific_outputs(
+    config: AppConfig, media_root: Path
+) -> None:
+    config = _with_targets(config, "pt-BR", "en")
+    video = media_root / "episode.mkv"
+    _write_clip(video)
+    repo = open_repository(config)
+    queued = enqueue_targets(config, repo, video, require_stability=False, source_language="en")
+    assert [item.target_language for item in queued.outcomes] == ["pt-BR", "en"]
+    results = []
+    for job in queued.jobs:
+        results.append(run_job(_context(config, repo, job)))
+    repo.close()
+    names = sorted(path.name for path in (item.output_path for item in results) if path is not None)
+    assert names == ["episode.en.srt", "episode.pt-BR.srt"]
+    assert all("pb" not in name for name in names)
+    texts = {
+        item.output_path.name: item.output_path.read_text(encoding="utf-8")  # type: ignore[union-attr]
+        for item in results
+    }
+    assert "ola" in texts["episode.pt-BR.srt"].lower()
+    assert "hello" in texts["episode.en.srt"].lower()
+
+
+def test_portuguese_source_skips_translation_only_for_matching_target(
+    config: AppConfig, media_root: Path
+) -> None:
+    config = _with_targets(config, "pt-BR", "en")
+    video = media_root / "episodio.mkv"
+    _write_clip(video)
+    repo = open_repository(config)
+    queued = enqueue_targets(config, repo, video, require_stability=False, source_language="pt")
+    translator = _FakeTranslator()
+    results = {
+        job.target_language: run_job(
+            _context(
+                config, repo, job, transcriber=_FakeTranscriber(language="pt"), translator=translator
+            )
+        )
+        for job in queued.jobs
+    }
+    payloads = {job.target_language: read_manifest_payload(config, job.id) for job in queued.jobs}
+    repo.close()
+    assert results["pt-BR"].output_path is not None
+    assert results["en"].output_path is not None
+    assert payloads["pt-BR"] is not None
+    assert payloads["en"] is not None
+    assert payloads["pt-BR"]["translation_executed"] is False
+    assert payloads["en"]["translation_executed"] is True
+    assert "hello" in results["pt-BR"].output_path.read_text(encoding="utf-8")
+    assert "hello" in results["en"].output_path.read_text(encoding="utf-8")
+    assert translator.calls == 1
+
+
+def test_missing_pair_fails_only_that_target(config: AppConfig, media_root: Path) -> None:
+    config = _with_targets(config, "pt-BR", "es")
+    video = media_root / "episode.mkv"
+    _write_clip(video)
+    repo = open_repository(config)
+    queued = enqueue_targets(config, repo, video, require_stability=False, source_language="en")
+    translator = _PtOnlyTranslator()
+    outcomes = {}
+    for job in queued.jobs:
+        try:
+            outcomes[job.target_language] = run_job(
+                _context(config, repo, job, translator=translator)
+            )
+        except NasSubtitlesError as exc:
+            outcomes[job.target_language] = exc
+    refreshed = {job.target_language: repo.get_job(job.id) for job in queued.jobs}
+    repo.close()
+    pt_result = outcomes["pt-BR"]
+    assert not isinstance(pt_result, NasSubtitlesError)
+    assert pt_result.output_path is not None
+    assert pt_result.output_path.name.endswith(".pt-BR.srt")
+    es_error = outcomes["es"]
+    assert isinstance(es_error, NasSubtitlesError)
+    assert es_error.code is ErrorCode.TRANSLATION_PAIR_MISSING
+    assert refreshed["es"] is not None
+    # The failed job stays running until the worker maps the error; the
+    # exception is isolated from the successful pt-BR result.
+    assert refreshed["pt-BR"] is not None
+    assert refreshed["pt-BR"].state is not JobState.FAILED

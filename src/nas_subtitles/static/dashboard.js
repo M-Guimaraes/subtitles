@@ -235,7 +235,7 @@ async function loadSettings() {
       ),
       card("Languages", [
         `Source: ${settings.languages.source}`,
-        `Target: ${settings.languages.target}`,
+        `Targets: ${(settings.languages.targets || [settings.languages.target]).join(", ")}`,
         `Low confidence: ${settings.languages.low_confidence}`,
       ]),
       card("Audio", [

@@ -55,6 +55,7 @@ __all__ = [
     "WebhookPathMap",
     "WebhooksConfig",
     "WorkerConfig",
+    "canonicalize_public_language_tag",
     "load_config",
     "root_id_for",
 ]
@@ -72,11 +73,41 @@ SOURCE_LANGUAGE_AUTO = "auto"
 """Sentinel for automatic source-language detection."""
 
 _LANGUAGE_PAIR_RE = re.compile(r"^[a-z]{2,3}:[a-z]{2,3}$")
+_PUBLIC_LANGUAGE_TAG_RE = re.compile(r"^[A-Za-z]{2,3}(-[A-Za-z0-9]{2,8})*$")
 _BACKEND_ONLY_PUBLIC_REJECT = frozenset({"pb"})
 """Argos-only codes; configuration and filenames use ``pt-BR``, never ``pb``."""
+_CANONICAL_PUBLIC_TAGS = {
+    "pt-br": "pt-BR",
+    "en": "en",
+    "es": "es",
+    "ja": "ja",
+}
 _SLUG_RE = re.compile(r"[^a-z0-9]+")
 
 _STRICT = ConfigDict(extra="forbid", frozen=True)
+
+
+def canonicalize_public_language_tag(value: str, *, field_name: str) -> str:
+    """Fold a public language tag. Argos ``pb`` is rejected, never aliased to ``pt``."""
+    stripped = value.strip().replace("_", "-")
+    if not stripped:
+        raise ValueError(f"{field_name} entries must not be empty")
+    lowered = stripped.lower()
+    primary = lowered.split("-", 1)[0]
+    if lowered in _BACKEND_ONLY_PUBLIC_REJECT or primary in _BACKEND_ONLY_PUBLIC_REJECT:
+        raise ValueError(
+            f"{field_name} must use a public identifier such as pt-BR; "
+            "Argos backend code 'pb' is not accepted"
+        )
+    if not _PUBLIC_LANGUAGE_TAG_RE.match(stripped):
+        raise ValueError(f"{field_name} {value!r} is not a public language tag")
+    if lowered in _CANONICAL_PUBLIC_TAGS:
+        return _CANONICAL_PUBLIC_TAGS[lowered]
+    parts = stripped.split("-")
+    primary_folded = parts[0].lower()
+    if len(parts) == 1:
+        return primary_folded
+    return primary_folded + "-" + "-".join(parts[1:])
 
 
 def root_id_for(path: Path) -> str:
@@ -213,19 +244,45 @@ class TranslationConfig(BaseModel):
         return value
 
     def allows(self, *, source_language: str, target_language: str) -> bool:
-        """``target_language`` is matched on its base tag, so ``pt-BR`` matches ``pt``."""
+        """Pairs use public families: ``pt-BR`` matches ``pt``, never Argos ``pb``."""
+        base_source = source_language.split("-")[0].lower()
         base_target = target_language.split("-")[0].lower()
-        return f"{source_language.lower()}:{base_target}" in self.allowed_pairs
+        return f"{base_source}:{base_target}" in self.allowed_pairs
 
 
 class LanguagesConfig(BaseModel):
-    """Public language identifiers. Backend codes such as Argos ``pb`` stay internal."""
+    """Public language identifiers. Backend codes such as Argos ``pb`` stay internal.
+
+    ``targets`` is the schema. A legacy single ``target`` is folded into
+    ``targets: [target]``; if both keys appear they must represent the same
+    one-item list.
+    """
 
     model_config = _STRICT
 
     source: str = SOURCE_LANGUAGE_AUTO
-    target: Literal["pt-BR"] = "pt-BR"
+    targets: tuple[str, ...] = ("pt-BR",)
     low_confidence: Literal["review"] = "review"
+
+    @model_validator(mode="before")
+    @classmethod
+    def _fold_legacy_target(cls, value: Any) -> Any:
+        """Accept the historical nested ``languages.target`` key."""
+        if not isinstance(value, dict):
+            return value
+        payload = dict(value)
+        single = payload.pop("target", None)
+        targets = payload.get("targets")
+        if single is None:
+            return payload
+        if targets is None:
+            payload["targets"] = [single]
+            return payload
+        if not isinstance(targets, list | tuple):
+            return payload
+        if list(targets) != [single]:
+            raise ValueError("languages.target and languages.targets must agree")
+        return payload
 
     @field_validator("source")
     @classmethod
@@ -235,23 +292,27 @@ class LanguagesConfig(BaseModel):
             raise ValueError("languages.source must be 'auto' or a public language tag")
         if stripped.lower() == SOURCE_LANGUAGE_AUTO:
             return SOURCE_LANGUAGE_AUTO
-        folded = stripped.replace("_", "-")
-        if (
-            folded.lower() in _BACKEND_ONLY_PUBLIC_REJECT
-            or folded.lower().split("-", 1)[0] in _BACKEND_ONLY_PUBLIC_REJECT
-        ):
-            raise ValueError(
-                "languages.source must use a public identifier such as pt-BR; "
-                "Argos backend code 'pb' is not accepted"
-            )
-        return folded
+        return canonicalize_public_language_tag(stripped, field_name="languages.source")
 
-    @field_validator("target")
+    @field_validator("targets")
     @classmethod
-    def _target_is_public(cls, value: str) -> str:
-        if value.lower() in _BACKEND_ONLY_PUBLIC_REJECT:
-            raise ValueError("languages.target must be the public identifier pt-BR, not pb")
-        return value
+    def _targets_are_public(cls, value: tuple[str, ...]) -> tuple[str, ...]:
+        if not value:
+            raise ValueError("languages.targets must list at least one public language")
+        normalised: list[str] = []
+        seen: set[str] = set()
+        for raw in value:
+            tag = canonicalize_public_language_tag(raw, field_name="languages.targets")
+            if tag in seen:
+                raise ValueError(f"languages.targets repeats {tag!r}")
+            seen.add(tag)
+            normalised.append(tag)
+        return tuple(normalised)
+
+    @property
+    def target(self) -> str:
+        """Primary public destination tag. Never ``pb``."""
+        return self.targets[0]
 
 
 class AudioConfig(BaseModel):
@@ -506,8 +567,26 @@ class AppConfig(BaseModel):
 
     @property
     def target_language(self) -> str:
-        """Public destination tag used in filenames and manifests, never ``pb``."""
+        """Primary public destination tag used in filenames and manifests, never ``pb``."""
         return self.languages.target
+
+    @property
+    def target_languages(self) -> tuple[str, ...]:
+        """Configured public destination tags, in order. Never includes ``pb``."""
+        return self.languages.targets
+
+    def pipeline_config_hash_for(self, target_language: str) -> str:
+        """Hash of settings that change what this *target* would produce.
+
+        Each target is its own job identity. The payload shape for a single
+        ``pt-BR`` target stays the historical ``languages.target`` object so
+        existing single-target jobs are not invalidated.
+        """
+        return stable_digest(self._pipeline_hash_payload(target_language))
+
+    def target_language_for_job(self, target_language: str | None) -> str:
+        """Resolve a job's public target, falling back to the primary."""
+        return target_language or self.target_language
 
     @property
     def roots(self) -> tuple[MediaRoot, ...]:
@@ -553,33 +632,53 @@ class AppConfig(BaseModel):
 
     @property
     def pipeline_config_hash(self) -> str:
-        """Hash of everything that changes the content the pipeline produces."""
-        return stable_digest(
-            {
-                "schema": CONFIG_HASH_SCHEMA_VERSION,
-                "target_language": self.target_language,
-                "languages": self.languages.model_dump(mode="json"),
-                "audio": self.audio.model_dump(mode="json"),
-                "language_policy": LANGUAGE_DECISION_POLICY_VERSION,
-                "translation_backend": self._translation_backend_identity(),
-                "asr": self.asr.model_dump(mode="json"),
-                "translation": self.translation.model_dump(mode="json"),
-                "subtitles": self.subtitles.model_dump(mode="json"),
-                "word_dedupe": TRANSCRIBE_WORD_DEDUPE_VERSION,
-            }
-        )
+        """Hash of everything that changes the content the pipeline produces.
 
-    def stage_config_hash(self, stage: PipelineStage) -> str:
+        Uses the primary target so a single-target ``pt-BR`` deployment keeps
+        the same identity. Multi-target enqueue calls
+        :meth:`pipeline_config_hash_for` per destination.
+        """
+        return self.pipeline_config_hash_for(self.target_language)
+
+    def stage_config_hash(
+        self, stage: PipelineStage, *, target_language: str | None = None
+    ) -> str:
         """Hash of only the settings that stage depends on."""
         return stable_digest(
             {
                 "schema": CONFIG_HASH_SCHEMA_VERSION,
                 "stage": stage,
-                "settings": self._stage_settings(stage),
+                "settings": self._stage_settings(
+                    stage, target_language=target_language or self.target_language
+                ),
             }
         )
 
-    def _stage_settings(self, stage: PipelineStage) -> dict[str, Any]:
+    def _pipeline_hash_payload(self, target_language: str) -> dict[str, Any]:
+        return {
+            "schema": CONFIG_HASH_SCHEMA_VERSION,
+            "target_language": target_language,
+            "languages": self._languages_identity(target_language),
+            "audio": self.audio.model_dump(mode="json"),
+            "language_policy": LANGUAGE_DECISION_POLICY_VERSION,
+            "translation_backend": self._translation_backend_identity(target_language),
+            "asr": self.asr.model_dump(mode="json"),
+            "translation": self.translation.model_dump(mode="json"),
+            "subtitles": self.subtitles.model_dump(mode="json"),
+            "word_dedupe": TRANSCRIBE_WORD_DEDUPE_VERSION,
+        }
+
+    def _languages_identity(self, target_language: str) -> dict[str, Any]:
+        """Historical ``languages`` hash object: source, one target, policy."""
+        return {
+            "source": self.languages.source,
+            "target": target_language,
+            "low_confidence": self.languages.low_confidence,
+        }
+
+    def _stage_settings(
+        self, stage: PipelineStage, *, target_language: str
+    ) -> dict[str, Any]:
         asr = self.asr.model_dump(mode="json")
         chunking = {
             "chunk_seconds": self.asr.chunk_seconds,
@@ -598,7 +697,7 @@ class AppConfig(BaseModel):
                     "device": asr["device"],
                     "compute_type": asr["compute_type"],
                     "detection_min_probability": asr["detection_min_probability"],
-                    "languages": self.languages.model_dump(mode="json"),
+                    "languages": self._languages_identity(target_language),
                     "audio": self.audio.model_dump(mode="json"),
                     "language_policy": LANGUAGE_DECISION_POLICY_VERSION,
                 }
@@ -615,26 +714,26 @@ class AppConfig(BaseModel):
             case PipelineStage.TRANSLATE:
                 return {
                     "translation": self.translation.model_dump(mode="json"),
-                    "target_language": self.target_language,
-                    "languages": self.languages.model_dump(mode="json"),
+                    "target_language": target_language,
+                    "languages": self._languages_identity(target_language),
                     "language_policy": LANGUAGE_DECISION_POLICY_VERSION,
-                    "translation_backend": self._translation_backend_identity(),
+                    "translation_backend": self._translation_backend_identity(target_language),
                     "normalizer": TRANSLATION_NORMALIZER_VERSION,
                 }
             case PipelineStage.RENDER:
-                return {"subtitles": subtitles, "target_language": self.target_language}
+                return {"subtitles": subtitles, "target_language": target_language}
             case PipelineStage.VALIDATE:
                 return {"subtitles": subtitles}
             case PipelineStage.PUBLISH:
                 return {
                     "publish_mode": str(self.publish_mode),
                     "existing_subtitle_policy": str(self.existing_subtitle_policy),
-                    "target_language": self.target_language,
+                    "target_language": target_language,
                 }
             case _:
                 assert_never(stage)
 
-    def _translation_backend_identity(self) -> dict[str, str]:
+    def _translation_backend_identity(self, target_language: str) -> dict[str, str]:
         """Argos from/to codes, so ``en→pb`` is not hashed as ``en→pt``.
 
         Public ``target_language`` stays ``pt-BR``. The lazy import avoids a
@@ -645,7 +744,7 @@ class AppConfig(BaseModel):
         return {
             "engine": self.translation.engine,
             "argos_from": to_argos_language_code("en"),
-            "argos_to": to_argos_language_code(self.target_language),
+            "argos_to": to_argos_language_code(target_language),
         }
 
 

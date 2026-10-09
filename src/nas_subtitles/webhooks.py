@@ -4,7 +4,7 @@ A separate process from the worker and the dashboard: it never takes
 ``worker.lock`` and never runs inference. Stopping this process leaves the
 daemon scanning and processing. Requests must carry a shared secret;
 unauthenticated webhooks are refused. Valid import events reuse
-``discovery.enqueue_path`` so a webhook and a later scan stay idempotent.
+``discovery.enqueue_targets`` so a webhook and a later scan stay idempotent.
 """
 
 from __future__ import annotations
@@ -22,7 +22,7 @@ from typing import Literal
 from urllib.parse import parse_qs, urlparse
 
 from .config import AppConfig, WebhookPathMap
-from .discovery import enqueue_path, is_candidate_name
+from .discovery import enqueue_targets, is_candidate_name
 from .domain import (
     ErrorCode,
     JobRecord,
@@ -444,41 +444,75 @@ def _enqueue_imported_path(
             code=ErrorCode.INVALID_MEDIA,
             detail={"path_token": path_token(resolved)},
         )
-    job, skip_reason = enqueue_path(
+    queued = enqueue_targets(
         config,
         repository,
         resolved,
         require_stability=False,
         probe=probe,
     )
-    if skip_reason is not None:
-        return {
-            "action": "skipped",
-            "reason": skip_reason,
-            "job_id": None,
-            "root_id": None,
-            "path_token": path_token(resolved),
-        }
-    assert job is not None
-    already = job.id in known_ids
-    known_ids.add(job.id)
-    action: WebhookAction = "already_queued" if already else "enqueued"
-    log_event(
-        _LOG,
-        "webhook import accepted",
-        job_id=job.id,
-        root_id=job.root_id,
-        path_token=path_token(resolved),
-        already_queued=already,
+    job_results: list[dict[str, object]] = []
+    for outcome in queued.outcomes:
+        if outcome.skip_reason is not None:
+            job_results.append(
+                {
+                    "action": "skipped",
+                    "reason": outcome.skip_reason,
+                    "job_id": None,
+                    "root_id": None,
+                    "path_token": path_token(resolved),
+                    "target_language": outcome.target_language,
+                }
+            )
+            continue
+        job = outcome.job
+        assert job is not None
+        already = job.id in known_ids
+        known_ids.add(job.id)
+        action: WebhookAction = "already_queued" if already else "enqueued"
+        log_event(
+            _LOG,
+            "webhook import accepted",
+            job_id=job.id,
+            root_id=job.root_id,
+            path_token=path_token(resolved),
+            already_queued=already,
+            target_language=outcome.target_language,
+        )
+        job_results.append(
+            {
+                "action": action,
+                "reason": None,
+                "job_id": job.id,
+                "root_id": job.root_id,
+                "path_token": path_token(resolved),
+                "state": str(job.state),
+                "target_language": outcome.target_language,
+                "job": _job_summary(job),
+            }
+        )
+    actions = {str(item["action"]) for item in job_results}
+    summary_action: WebhookAction
+    if "enqueued" in actions:
+        summary_action = "enqueued"
+    elif "already_queued" in actions:
+        summary_action = "already_queued"
+    else:
+        summary_action = "skipped"
+    first = next(
+        (item for item in job_results if item["action"] in {"enqueued", "already_queued"}),
+        job_results[0] if job_results else {},
     )
     return {
-        "action": action,
-        "reason": None,
-        "job_id": job.id,
-        "root_id": job.root_id,
+        "action": summary_action,
+        "reason": first.get("reason"),
+        "job_id": first.get("job_id"),
+        "root_id": first.get("root_id"),
         "path_token": path_token(resolved),
-        "state": str(job.state),
-        "job": _job_summary(job),
+        "state": first.get("state"),
+        "target_language": first.get("target_language"),
+        "job": first.get("job"),
+        "jobs": job_results,
     }
 
 
@@ -508,6 +542,7 @@ def _job_summary(job: JobRecord) -> dict[str, object]:
         "state": str(job.state),
         "root_id": job.root_id,
         "relative_path": job.relative_path,
+        "target_language": job.target_language,
     }
 
 

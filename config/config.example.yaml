@@ -16,7 +16,10 @@ publish_mode: staging
 existing_subtitle_policy: skip
 languages:
   source: auto
-  target: pt-BR
+  # Public identifiers only (pt-BR, en, es). Argos `pb` is internal.
+  # A legacy single `target: pt-BR` key still loads and is folded into targets.
+  targets:
+    - pt-BR
   low_confidence: review
 audio:
   stream: auto

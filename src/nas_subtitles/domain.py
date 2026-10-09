@@ -125,7 +125,7 @@ FINGERPRINT_SAMPLE_BYTES = 1 << 20
 
 CHECKPOINT_SCHEMA_VERSION = 1
 MANIFEST_SCHEMA_VERSION = 2
-DB_SCHEMA_VERSION = 2
+DB_SCHEMA_VERSION = 3
 TRANSLATION_NORMALIZER_VERSION = 1
 """Bumping this invalidates every cached translation."""
 
@@ -608,7 +608,7 @@ class MediaFingerprint:
 
 @dataclass(frozen=True, slots=True)
 class ExistingSubtitle:
-    """A Portuguese subtitle already present, found on disk or inside the file."""
+    """A subtitle already present, found on disk or inside the file."""
 
     origin: SubtitleOrigin
     language: str | None
@@ -616,9 +616,13 @@ class ExistingSubtitle:
     path: Path | None = None
     stream_index: int | None = None
     satisfies_target: bool = False
-    """``True`` only for a complete, non-forced Portuguese subtitle."""
+    """``True`` only for a complete, non-forced Portuguese subtitle.
+
+    Per-target skip uses :func:`nas_subtitles.discovery.subtitle_satisfies_language`
+    so an English sidecar does not satisfy a ``pt-BR`` job and vice versa.
+    """
     uncertain: bool = False
-    """Missing metadata does not prove the absence of Portuguese."""
+    """Missing metadata does not prove the absence of a matching subtitle."""
     reason: str = ""
 
 
@@ -939,6 +943,13 @@ class JobRecord:
     preview_offset_seconds: Seconds | None = None
     approved_at: datetime | None = None
     execution_scope: JobExecutionScope | None = None
+    target_language: str | None = None
+    """Public destination tag for this job (``pt-BR``, ``en``). Never Argos ``pb``.
+
+    Shared contract change for roadmap 005: each configured target is its own
+    job identity. ``None`` means “use the configured primary target”, which
+    keeps rows written before schema version 3 readable.
+    """
 
     def __post_init__(self) -> None:
         object.__setattr__(
@@ -1112,6 +1123,7 @@ class JobRepository(Protocol):
         audio_stream_index_override: int | None = None,
         preview_seconds: Seconds | None = None,
         preview_offset_seconds: Seconds | None = None,
+        target_language: str | None = None,
     ) -> JobRecord: ...
 
     def get_job(self, job_id: JobId) -> JobRecord | None: ...

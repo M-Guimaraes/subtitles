@@ -145,6 +145,7 @@ class SqliteJobRepository:
         audio_stream_index_override: int | None = None,
         preview_seconds: Seconds | None = None,
         preview_offset_seconds: Seconds | None = None,
+        target_language: str | None = None,
     ) -> JobRecord:
         now = datetime.now(tz=UTC)
         fingerprint_json = _fingerprint_json(fingerprint)
@@ -178,8 +179,9 @@ class SqliteJobRepository:
                     id, root_id, relative_path, fingerprint, pipeline_config_hash,
                     state, current_stage, priority, attempt_count, created_at, updated_at,
                     source_language_override, audio_stream_index_override,
-                    preview_seconds, preview_offset_seconds, execution_scope
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?)
+                    preview_seconds, preview_offset_seconds, execution_scope,
+                    target_language
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     job_id,
@@ -197,6 +199,7 @@ class SqliteJobRepository:
                     preview_seconds,
                     preview_offset_seconds,
                     str(scope),
+                    target_language,
                 ),
             )
         job = self.get_job(job_id)
@@ -765,7 +768,19 @@ def _job_from_row(row: sqlite3.Row) -> JobRecord:
         preview_offset_seconds=row["preview_offset_seconds"],
         approved_at=_optional_datetime(row["approved_at"]),
         execution_scope=_execution_scope_from_row(row),
+        target_language=_optional_target_language(row),
     )
+
+
+def _optional_target_language(row: sqlite3.Row) -> str | None:
+    try:
+        stored = row["target_language"]
+    except IndexError:
+        return None
+    if stored is None:
+        return None
+    text = str(stored).strip()
+    return text or None
 
 
 def _execution_scope_from_row(row: sqlite3.Row) -> JobExecutionScope:
