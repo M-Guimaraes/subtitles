@@ -25,6 +25,7 @@ from .domain import (
     ErrorCode,
     ExistingSubtitle,
     ExistingSubtitlePolicy,
+    JobKind,
     JobRecord,
     JobRepository,
     JobState,
@@ -33,6 +34,7 @@ from .domain import (
     ProbeResult,
     ScanObservation,
     SubtitleOrigin,
+    infer_job_kind,
 )
 from .language import public_language_family, subtitle_suffix_language
 from .logging_setup import log_event, path_token
@@ -429,7 +431,12 @@ def scan(
                 skip_reason = _existing_subtitle_skip_reason(
                     config, path, probe_result, target_language=target
                 )
-                queued_already = _already_queued(repository, fingerprint, pipeline_hash)
+                queued_already = _already_queued(
+                    repository,
+                    fingerprint,
+                    pipeline_hash,
+                    job_kind=JobKind.SUBTITLES,
+                )
                 if skip_reason is not None:
                     skipped_existing += 1
                     if not queued_already:
@@ -462,6 +469,7 @@ def scan(
                                 fingerprint=fingerprint,
                                 pipeline_config_hash=pipeline_hash,
                                 target_language=target,
+                                job_kind=JobKind.SUBTITLES,
                             )
                             if skipped_job.state is JobState.QUEUED:
                                 repository.transition(
@@ -486,6 +494,7 @@ def scan(
                         fingerprint=fingerprint,
                         pipeline_config_hash=pipeline_hash,
                         target_language=target,
+                        job_kind=JobKind.SUBTITLES,
                     )
                     log_event(
                         _LOG,
@@ -628,6 +637,7 @@ def enqueue_targets(
             preview_seconds=preview_seconds,
             preview_offset_seconds=preview_offset_seconds,
             target_language=target,
+            job_kind=JobKind.SUBTITLES,
         )
         log_event(
             _LOG,
@@ -706,18 +716,26 @@ def _count_ignored_names(
 
 
 def _already_queued(
-    repository: JobRepository, fingerprint: MediaFingerprint, pipeline_config_hash: str
+    repository: JobRepository,
+    fingerprint: MediaFingerprint,
+    pipeline_config_hash: str,
+    *,
+    job_kind: JobKind = JobKind.SUBTITLES,
 ) -> bool:
     """True when a *full* library job already exists for this execution identity.
 
     Preview jobs are ignored: ``--preview-seconds`` never produces the library
     sidecar and must not block automatic processing. Any full-job state in
     ``LIBRARY_SCAN_KNOWN_STATES`` counts so scans and restarts reuse that row
-    instead of enqueueing a duplicate.
+    instead of enqueueing a duplicate. Dubbing jobs never satisfy a subtitle
+    scan, and vice versa.
     """
     digest = fingerprint.digest()
+    kind = infer_job_kind(job_kind)
     for job in repository.list_jobs(limit=10_000):
         if not job.is_library_job():
+            continue
+        if infer_job_kind(job.job_kind) is not kind:
             continue
         if job.state not in LIBRARY_SCAN_KNOWN_STATES:
             continue

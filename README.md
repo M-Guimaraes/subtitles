@@ -25,7 +25,7 @@ A mídia original permanece intacta. A publicação nunca sobrescreve um arquivo
 
 ## Estado do projeto
 
-Os itens **000–005** do [roadmap](ROADMAP.md) estão concluídos. A implementação foi exercitada em um Mac Apple Silicon (`arm64`).
+Os itens **000–005** do [roadmap](ROADMAP.md) estão concluídos. O item **006** (dublagem pt-BR) está ativo na fase 1: contratos, `job_kind` e CLI; os motores de síntese ainda não existem. A implementação de legendas foi exercitada em um Mac Apple Silicon (`arm64`).
 
 | Área | Situação |
 |---|---|
@@ -35,9 +35,9 @@ Os itens **000–005** do [roadmap](ROADMAP.md) estão concluídos. A implementa
 | Implantação em NAS | Ainda não realizada |
 | Piloto em episódio real da biblioteca | Ainda não realizado |
 | Validação em amd64 ou GPU | Ainda não realizada |
-| Dublagem | Planejada no item 006; não implementada |
+| Dublagem | Fase 1 do item 006: CLI e persistência; síntese ainda não implementada |
 
-**O comando `nas-subs dub` ainda não existe.** Os webhooks também não foram exercitados contra instâncias reais de Sonarr/Radarr ou um NAS. Consulte [os resultados de benchmark](docs/benchmark.md) para conhecer as medições disponíveis.
+O comando `nas-subs dub` existe para enfileirar e inspecionar jobs de dublagem. `nas-subs dub process` só conclui a etapa `probe` nesta fase; as etapas seguintes retornam `not_implemented`. Os webhooks também não foram exercitados contra instâncias reais de Sonarr/Radarr ou um NAS. Consulte [os resultados de benchmark](docs/benchmark.md) para conhecer as medições disponíveis.
 
 ## Português brasileiro: alcance e limitações
 

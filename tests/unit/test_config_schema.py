@@ -9,6 +9,7 @@ import pytest
 from nas_subtitles.config import AppConfig, load_config, root_id_for
 from nas_subtitles.domain import (
     ConfigurationError,
+    DubbingProfile,
     ExistingSubtitlePolicy,
     PipelineStage,
     PublishMode,
@@ -60,6 +61,11 @@ def test_example_config_matches_the_documented_defaults(config: AppConfig) -> No
     assert config.webhooks.port == 8788
     assert config.webhooks.token is None
     assert config.webhooks.path_maps == ()
+    assert config.dubbing.profile is DubbingProfile.CPU_FIXED
+    assert config.dubbing.target_language == "pt-BR"
+    assert config.dubbing.voice == "pt_BR-faber-medium"
+    assert config.dubbing.min_speed == pytest.approx(0.90)
+    assert config.dubbing.max_speed == pytest.approx(1.15)
 
 
 def test_derived_paths_live_under_state(config: AppConfig) -> None:

@@ -19,6 +19,7 @@ from nas_subtitles.domain import (
     ExitCode,
     JobEvent,
     JobExecutionScope,
+    JobKind,
     JobState,
     LockBusyError,
     MediaFingerprint,
@@ -72,6 +73,9 @@ def test_initialise_enables_wal_and_foreign_keys(config: AppConfig) -> None:
         "translation_cache",
         "metrics",
         "scan_observations",
+        "dub_segments",
+        "voice_assignments",
+        "synthesis_artifacts",
     } <= tables
 
 
@@ -197,6 +201,27 @@ def test_state_dir_lock_rejects_a_second_holder(config: AppConfig) -> None:
             StateDirLock(config.lock_path).__enter__()
     finally:
         held.__exit__(None, None, None)
+
+
+def test_subtitle_and_dubbing_rows_can_share_a_fingerprint(config: AppConfig) -> None:
+    repo = open_repository(config)
+    fingerprint = _fingerprint()
+    subtitles = repo.enqueue(
+        fingerprint=fingerprint, pipeline_config_hash="cfg-hash", job_kind=JobKind.SUBTITLES
+    )
+    dubbed = repo.enqueue(
+        fingerprint=fingerprint, pipeline_config_hash="cfg-hash", job_kind=JobKind.DUBBING
+    )
+    again = repo.enqueue(
+        fingerprint=fingerprint, pipeline_config_hash="cfg-hash", job_kind=JobKind.DUBBING
+    )
+    jobs = repo.list_jobs()
+    repo.close()
+    assert subtitles.id != dubbed.id
+    assert again.id == dubbed.id
+    assert subtitles.job_kind is JobKind.SUBTITLES
+    assert dubbed.job_kind is JobKind.DUBBING
+    assert len(jobs) == 2
 
 
 def test_preview_and_full_jobs_can_coexist_for_the_same_identity(config: AppConfig) -> None:

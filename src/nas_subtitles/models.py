@@ -385,6 +385,9 @@ def verify_models(config: AppConfig, *, offline: bool = True) -> tuple[ModelIden
             _load_whisper_offline(config, identity.path)
         elif identity.kind is ModelKind.TRANSLATION:
             _verify_argos_offline(config)
+        elif identity.kind in {ModelKind.TTS, ModelKind.SEPARATION}:
+            # Presence on disk is enough until the dubbing engines land.
+            pass
         verified.append(identity)
     return tuple(verified)
 

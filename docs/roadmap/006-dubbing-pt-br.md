@@ -1,6 +1,6 @@
 # Roadmap final — Dublagem pt-BR no CLI `subtitles`
 
-**Status:** PLANNED
+**Status:** ACTIVE (phase 1 — contracts and migration)
 
 ## 1. Objetivo e escopo
 

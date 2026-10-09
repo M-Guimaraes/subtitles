@@ -33,7 +33,9 @@ from .domain import (
     TRANSCRIBE_WORD_DEDUPE_VERSION,
     TRANSLATION_NORMALIZER_VERSION,
     ConfigurationError,
+    DubbingProfile,
     ExistingSubtitlePolicy,
+    JobKind,
     PipelineStage,
     PublishMode,
     stable_digest,
@@ -48,6 +50,7 @@ __all__ = [
     "AsrConfig",
     "AudioConfig",
     "DashboardConfig",
+    "DubbingConfig",
     "LanguagesConfig",
     "MediaRoot",
     "SubtitlesConfig",
@@ -440,6 +443,37 @@ class WebhooksConfig(BaseModel):
         return stripped or None
 
 
+class DubbingConfig(BaseModel):
+    """Local pt-BR dubbing. Changing these settings does not invalidate subtitle jobs."""
+
+    model_config = _STRICT
+
+    profile: DubbingProfile = DubbingProfile.CPU_FIXED
+    target_language: str = "pt-BR"
+    voice: str = "pt_BR-faber-medium"
+    min_speed: float = Field(default=0.90, gt=0.0, le=1.0)
+    max_speed: float = Field(default=1.15, gt=0.0, le=4.0)
+
+    @field_validator("target_language")
+    @classmethod
+    def _public_target(cls, value: str) -> str:
+        return canonicalize_public_language_tag(value, field_name="dubbing.target_language")
+
+    @field_validator("voice")
+    @classmethod
+    def _voice_not_empty(cls, value: str) -> str:
+        stripped = value.strip()
+        if not stripped:
+            raise ValueError("dubbing.voice must name a local voice id")
+        return stripped
+
+    @model_validator(mode="after")
+    def _speed_window(self) -> DubbingConfig:
+        if self.max_speed < self.min_speed:
+            raise ValueError("dubbing.max_speed must be greater than or equal to dubbing.min_speed")
+        return self
+
+
 class SubtitlesConfig(BaseModel):
     model_config = _STRICT
 
@@ -483,6 +517,7 @@ class AppConfig(BaseModel):
     subtitles: SubtitlesConfig = Field(default_factory=SubtitlesConfig)
     dashboard: DashboardConfig = Field(default_factory=DashboardConfig)
     webhooks: WebhooksConfig = Field(default_factory=WebhooksConfig)
+    dubbing: DubbingConfig = Field(default_factory=DubbingConfig)
 
     # -- validation -------------------------------------------------------- #
 
@@ -575,13 +610,26 @@ class AppConfig(BaseModel):
         """Configured public destination tags, in order. Never includes ``pb``."""
         return self.languages.targets
 
-    def pipeline_config_hash_for(self, target_language: str) -> str:
+    def pipeline_config_hash_for(
+        self, target_language: str, *, job_kind: JobKind | None = None
+    ) -> str:
         """Hash of settings that change what this *target* would produce.
 
         Each target is its own job identity. The payload shape for a single
-        ``pt-BR`` target stays the historical ``languages.target`` object so
-        existing single-target jobs are not invalidated.
+        ``pt-BR`` subtitle target stays the historical ``languages.target``
+        object so existing single-target jobs are not invalidated. Dubbing
+        hashes include ``job_kind`` and :attr:`dubbing` and never collide with
+        a subtitle job even when the unique index is absent.
         """
+        kind = JobKind.SUBTITLES if job_kind is None else job_kind
+        if kind is JobKind.DUBBING:
+            return stable_digest(
+                {
+                    **self._pipeline_hash_payload(target_language),
+                    "job_kind": str(kind),
+                    "dubbing": self.dubbing.model_dump(mode="json"),
+                }
+            )
         return stable_digest(self._pipeline_hash_payload(target_language))
 
     def target_language_for_job(self, target_language: str | None) -> str:
@@ -617,6 +665,14 @@ class AppConfig(BaseModel):
     @property
     def translation_models_dir(self) -> Path:
         return self.models_dir / "argos"
+
+    @property
+    def tts_models_dir(self) -> Path:
+        return self.models_dir / "piper"
+
+    @property
+    def separation_models_dir(self) -> Path:
+        return self.models_dir / "separator"
 
     def root_for(self, path: Path) -> MediaRoot | None:
         """Return the configured root containing ``path``, longest match first."""
@@ -726,6 +782,29 @@ class AppConfig(BaseModel):
                     "existing_subtitle_policy": str(self.existing_subtitle_policy),
                     "target_language": target_language,
                 }
+            case PipelineStage.SEPARATE:
+                return {"dubbing": self.dubbing.model_dump(mode="json"), "stage": "separate"}
+            case PipelineStage.ADAPT:
+                return {
+                    "dubbing": self.dubbing.model_dump(mode="json"),
+                    "target_language": target_language,
+                    "normalizer": TRANSLATION_NORMALIZER_VERSION,
+                }
+            case PipelineStage.SYNTHESIZE:
+                return {
+                    "dubbing": self.dubbing.model_dump(mode="json"),
+                    "voice": self.dubbing.voice,
+                    "profile": str(self.dubbing.profile),
+                }
+            case PipelineStage.SYNC:
+                return {
+                    "min_speed": self.dubbing.min_speed,
+                    "max_speed": self.dubbing.max_speed,
+                }
+            case PipelineStage.MIX:
+                return {"dubbing": self.dubbing.model_dump(mode="json"), "stage": "mix"}
+            case PipelineStage.VALIDATE_AUDIO:
+                return {"dubbing": self.dubbing.model_dump(mode="json"), "stage": "validate_audio"}
             case _:
                 assert_never(stage)
 

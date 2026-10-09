@@ -30,6 +30,8 @@ __all__ = [
     "AUDIO_SAMPLE_RATE_HZ",
     "CHECKPOINT_SCHEMA_VERSION",
     "DB_SCHEMA_VERSION",
+    "DUBBING_PLAN_SCHEMA_VERSION",
+    "DUBBING_STAGE_ORDER",
     "ENGLISH",
     "EXIT_CODE_BY_ERROR",
     "FINGERPRINT_SAMPLE_BYTES",
@@ -51,9 +53,15 @@ __all__ = [
     "AudioChunk",
     "AudioChunkSpec",
     "AudioExtractor",
+    "AudioMixer",
     "AudioStreamInfo",
     "ChunkTranscript",
     "ConfigurationError",
+    "DialogueSeparator",
+    "DubSegment",
+    "DubSegmentReviewState",
+    "DubbingProfile",
+    "DubbingQualityReport",
     "ErrorCode",
     "EventLevel",
     "ExistingSubtitle",
@@ -62,6 +70,7 @@ __all__ = [
     "JobClaim",
     "JobEvent",
     "JobExecutionScope",
+    "JobKind",
     "JobManifest",
     "JobMetrics",
     "JobRecord",
@@ -87,10 +96,14 @@ __all__ = [
     "QualitySeverity",
     "ScanObservation",
     "Seconds",
+    "SeparatedAudio",
+    "SpeechSynthesizer",
     "SubtitleCue",
     "SubtitleOrigin",
     "SubtitleRenderer",
     "SubtitleStreamInfo",
+    "SynthesisArtifact",
+    "TimelineRenderer",
     "Transcriber",
     "Transcript",
     "TranscriptSegment",
@@ -98,12 +111,17 @@ __all__ = [
     "TranslationCacheEntry",
     "TranslationUnit",
     "Translator",
+    "VoiceAssignment",
+    "VoiceKind",
     "Word",
     "canonical_json",
     "exit_code_for",
     "infer_execution_scope",
+    "infer_job_kind",
     "stable_digest",
     "stable_unit_id",
+    "stage_window",
+    "stages_for",
 ]
 
 # --------------------------------------------------------------------------- #
@@ -125,7 +143,9 @@ FINGERPRINT_SAMPLE_BYTES = 1 << 20
 
 CHECKPOINT_SCHEMA_VERSION = 1
 MANIFEST_SCHEMA_VERSION = 2
-DB_SCHEMA_VERSION = 3
+DB_SCHEMA_VERSION = 4
+DUBBING_PLAN_SCHEMA_VERSION = 1
+"""Bumping this invalidates exported dubbing plans."""
 TRANSLATION_NORMALIZER_VERSION = 1
 """Bumping this invalidates every cached translation."""
 
@@ -314,6 +334,31 @@ class JobState(StrEnum):
     CANCELLED = "cancelled"
 
 
+class JobKind(StrEnum):
+    """Persistent job identity. Subtitle and dubbing work never share a row."""
+
+    SUBTITLES = "subtitles"
+    DUBBING = "dubbing"
+
+
+class DubbingProfile(StrEnum):
+    """Named synthesis stacks. ``cpu-fixed`` is the MVP; ``mac-clone`` is experimental."""
+
+    CPU_FIXED = "cpu-fixed"
+    MAC_CLONE = "mac-clone"
+
+
+class VoiceKind(StrEnum):
+    FIXED = "fixed"
+    CLONE = "clone"
+
+
+class DubSegmentReviewState(StrEnum):
+    PENDING = "pending"
+    APPROVED = "approved"
+    REJECTED = "rejected"
+
+
 class JobExecutionScope(StrEnum):
     """Persistent execution identity: preview never satisfies the library.
 
@@ -343,6 +388,14 @@ def infer_execution_scope(
     return JobExecutionScope.FULL
 
 
+def infer_job_kind(stored: JobKind | str | None = None) -> JobKind:
+    """Resolve kind for new jobs and for rows written before schema version 4."""
+
+    if stored is None or stored == "":
+        return JobKind.SUBTITLES
+    return stored if isinstance(stored, JobKind) else JobKind(stored)
+
+
 LIBRARY_SCAN_KNOWN_STATES: frozenset[JobState] = frozenset(JobState)
 """States of a *full* job that mean the scanner must not enqueue another.
 
@@ -367,6 +420,12 @@ class PipelineStage(StrEnum):
     RENDER = "render"
     VALIDATE = "validate"
     PUBLISH = "publish"
+    SEPARATE = "separate"
+    ADAPT = "adapt"
+    SYNTHESIZE = "synthesize"
+    SYNC = "sync"
+    MIX = "mix"
+    VALIDATE_AUDIO = "validate_audio"
 
 
 PIPELINE_STAGE_ORDER: tuple[PipelineStage, ...] = (
@@ -380,6 +439,54 @@ PIPELINE_STAGE_ORDER: tuple[PipelineStage, ...] = (
     PipelineStage.VALIDATE,
     PipelineStage.PUBLISH,
 )
+"""Subtitle pipeline. Dubbing uses :data:`DUBBING_STAGE_ORDER`."""
+
+DUBBING_STAGE_ORDER: tuple[PipelineStage, ...] = (
+    PipelineStage.PROBE,
+    PipelineStage.DETECT_LANGUAGE,
+    PipelineStage.EXTRACT,
+    PipelineStage.SEPARATE,
+    PipelineStage.TRANSCRIBE,
+    PipelineStage.MERGE,
+    PipelineStage.TRANSLATE,
+    PipelineStage.ADAPT,
+    PipelineStage.SYNTHESIZE,
+    PipelineStage.SYNC,
+    PipelineStage.MIX,
+    PipelineStage.VALIDATE_AUDIO,
+    PipelineStage.PUBLISH,
+)
+"""Dubbing pipeline. Does not use SRT ``render``/``validate`` stages."""
+
+
+def stages_for(job_kind: JobKind | str | None) -> tuple[PipelineStage, ...]:
+    """Stage sequence for a job kind. Subtitle order is unchanged."""
+
+    if infer_job_kind(job_kind) is JobKind.DUBBING:
+        return DUBBING_STAGE_ORDER
+    return PIPELINE_STAGE_ORDER
+
+
+def stage_window(
+    stages: Sequence[PipelineStage],
+    *,
+    start_stage: PipelineStage | None = None,
+    stop_after: PipelineStage | None = None,
+) -> tuple[PipelineStage, ...]:
+    """Inclusive slice of ``stages`` honoured by ``run_job``.
+
+    ``start_stage`` and ``stop_after`` must belong to ``stages``. An inverted
+    window is rejected rather than silently running the whole pipeline.
+    """
+
+    ordered = tuple(stages)
+    if not ordered:
+        raise ValueError("stage sequence must not be empty")
+    start_index = 0 if start_stage is None else ordered.index(start_stage)
+    end_index = len(ordered) - 1 if stop_after is None else ordered.index(stop_after)
+    if end_index < start_index:
+        raise ValueError("stop_after precedes start_stage")
+    return ordered[start_index : end_index + 1]
 
 
 class PublishMode(StrEnum):
@@ -403,6 +510,8 @@ class EventLevel(StrEnum):
 class ModelKind(StrEnum):
     ASR = "asr"
     TRANSLATION = "translation"
+    TTS = "tts"
+    SEPARATION = "separation"
 
 
 class LanguageSource(StrEnum):
@@ -449,6 +558,12 @@ class QualityFlagCode(StrEnum):
     REPEATED_TEXT = "repeated_text"
     TEXT_WITHOUT_SPEECH = "text_without_speech"
     LANGUAGE_UNCERTAIN = "language_uncertain"
+    # Dubbing advisories and audio integrity (roadmap 006).
+    DIALOGUE_LEAK = "dialogue_leak"
+    SPEED_LIMIT_EXCEEDED = "speed_limit_exceeded"
+    OVERLAP_UNRESOLVED = "overlap_unresolved"
+    CLIPPING_DETECTED = "clipping_detected"
+    WORD_TRUNCATED = "word_truncated"
 
 
 STRUCTURAL_FLAG_CODES: frozenset[QualityFlagCode] = frozenset(
@@ -843,6 +958,83 @@ class QualityReport:
 
 
 # --------------------------------------------------------------------------- #
+# Dubbing (roadmap 006)
+# --------------------------------------------------------------------------- #
+
+
+@dataclass(frozen=True, slots=True)
+class VoiceAssignment:
+    """Fixed Piper voice or a clone reference, scoped to one speaker."""
+
+    speaker_id: str
+    voice_id: str
+    kind: VoiceKind = VoiceKind.FIXED
+    reference_sha256: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class DubSegment:
+    """One speech window on the video timeline, versioned for plan apply."""
+
+    segment_id: str
+    job_id: JobId
+    revision: int
+    start_seconds: Seconds
+    end_seconds: Seconds
+    original_text: str = ""
+    translated_text: str = ""
+    adapted_text: str = ""
+    speaker_id: str | None = None
+    review_state: DubSegmentReviewState = DubSegmentReviewState.PENDING
+
+
+@dataclass(frozen=True, slots=True)
+class SynthesisArtifact:
+    """On-disk synthesis of one :class:`DubSegment` revision."""
+
+    job_id: JobId
+    segment_id: str
+    revision: int
+    path: Path
+    duration_seconds: Seconds
+    model_identity: str
+    sha256: str
+    seed: int | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class DubbingQualityReport:
+    """Audio gates for a dubbing job. Distinct from subtitle :class:`QualityReport`."""
+
+    flags: tuple[QualityFlag, ...] = ()
+    coverage_complete: bool = True
+    peak_dbtp: float | None = None
+
+    @property
+    def structural_errors(self) -> tuple[QualityFlag, ...]:
+        return tuple(flag for flag in self.flags if flag.severity is QualitySeverity.STRUCTURAL)
+
+    @property
+    def blocks_publication(self) -> bool:
+        return bool(self.structural_errors)
+
+    @property
+    def requires_review(self) -> bool:
+        return bool(self.flags) or not self.coverage_complete
+
+
+@dataclass(frozen=True, slots=True)
+class SeparatedAudio:
+    """Dialogue and optional accompaniment for one owned chunk."""
+
+    chunk: AudioChunkSpec
+    dialogue_path: Path
+    accompaniment_path: Path | None = None
+    sha256: str | None = None
+    model_identity: ModelIdentity | None = None
+
+
+# --------------------------------------------------------------------------- #
 # Models, records and manifests
 # --------------------------------------------------------------------------- #
 
@@ -883,6 +1075,8 @@ class ArtifactRecord:
     schema_version: int
     stage_config_hash: str
     chunk_index: int | None = None
+    segment_id: str | None = None
+    revision: int | None = None
     created_at: datetime | None = None
     id: int | None = None
 
@@ -950,6 +1144,13 @@ class JobRecord:
     job identity. ``None`` means “use the configured primary target”, which
     keeps rows written before schema version 3 readable.
     """
+    job_kind: JobKind | None = None
+    """``subtitles`` or ``dubbing``. ``None`` on read becomes ``subtitles``.
+
+    Shared contract change for roadmap 006: an existing `.pt-BR.srt` does not
+    satisfy a dubbing job, and the two kinds never share a uniqueness row.
+    """
+    dubbing_profile: str | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(
@@ -959,6 +1160,7 @@ class JobRecord:
                 stored=self.execution_scope, preview_seconds=self.preview_seconds
             ),
         )
+        object.__setattr__(self, "job_kind", infer_job_kind(self.job_kind))
 
     def is_library_job(self) -> bool:
         """True when this job is the scanner's library-satisfying identity."""
@@ -1106,6 +1308,58 @@ class SubtitleRenderer(Protocol):
 
 
 @runtime_checkable
+class DialogueSeparator(Protocol):
+    """Local dialogue/accompaniment splitter. Must never download at call time."""
+
+    @property
+    def model_identity(self) -> ModelIdentity: ...
+
+    def separate(self, chunk: AudioChunk, *, destination_dir: Path) -> SeparatedAudio: ...
+
+
+@runtime_checkable
+class SpeechSynthesizer(Protocol):
+    """Local TTS. Must never download at call time."""
+
+    @property
+    def model_identity(self) -> ModelIdentity: ...
+
+    def synthesize(
+        self,
+        segment: DubSegment,
+        *,
+        voice: VoiceAssignment,
+        destination: Path,
+    ) -> SynthesisArtifact: ...
+
+
+@runtime_checkable
+class TimelineRenderer(Protocol):
+    """Places synthesised takes onto the absolute video timeline."""
+
+    def render(
+        self,
+        *,
+        artifacts: Sequence[SynthesisArtifact],
+        duration_seconds: Seconds,
+        destination: Path,
+    ) -> Path: ...
+
+
+@runtime_checkable
+class AudioMixer(Protocol):
+    """Mixes dubbed dialogue with accompaniment without doubling the original."""
+
+    def mix(
+        self,
+        *,
+        dialogue: Path,
+        accompaniment: Path | None,
+        destination: Path,
+    ) -> Path: ...
+
+
+@runtime_checkable
 class JobRepository(Protocol):
     """Persistence boundary for the queue, artifacts, events and caches."""
 
@@ -1124,7 +1378,17 @@ class JobRepository(Protocol):
         preview_seconds: Seconds | None = None,
         preview_offset_seconds: Seconds | None = None,
         target_language: str | None = None,
+        job_kind: JobKind | None = None,
+        dubbing_profile: str | None = None,
     ) -> JobRecord: ...
+
+    def list_dub_segments(
+        self, *, job_id: JobId, revision: int | None = None
+    ) -> tuple[DubSegment, ...]: ...
+
+    def replace_dub_plan(
+        self, *, job_id: JobId, revision: int, segments: Sequence[DubSegment]
+    ) -> tuple[DubSegment, ...]: ...
 
     def get_job(self, job_id: JobId) -> JobRecord | None: ...
 

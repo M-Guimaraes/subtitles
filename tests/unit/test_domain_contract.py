@@ -8,6 +8,7 @@ from pathlib import Path
 import pytest
 
 from nas_subtitles.domain import (
+    DUBBING_STAGE_ORDER,
     EXIT_CODE_BY_ERROR,
     LIBRARY_SCAN_KNOWN_STATES,
     PIPELINE_STAGE_ORDER,
@@ -17,6 +18,7 @@ from nas_subtitles.domain import (
     ErrorCode,
     ExitCode,
     JobExecutionScope,
+    JobKind,
     JobState,
     MediaFingerprint,
     PipelineStage,
@@ -28,8 +30,10 @@ from nas_subtitles.domain import (
     Word,
     exit_code_for,
     infer_execution_scope,
+    infer_job_kind,
     stable_digest,
     stable_unit_id,
+    stages_for,
 )
 
 
@@ -69,11 +73,23 @@ def test_permission_media_and_conflict_are_never_retried() -> None:
         assert code not in RETRYABLE_ERROR_CODES
 
 
-def test_stage_order_covers_every_stage_once() -> None:
-    assert len(PIPELINE_STAGE_ORDER) == len(PipelineStage)
-    assert set(PIPELINE_STAGE_ORDER) == set(PipelineStage)
+def test_subtitle_stage_order_is_unchanged() -> None:
     assert PIPELINE_STAGE_ORDER[0] is PipelineStage.PROBE
     assert PIPELINE_STAGE_ORDER[-1] is PipelineStage.PUBLISH
+    assert len(PIPELINE_STAGE_ORDER) == len(set(PIPELINE_STAGE_ORDER))
+    assert stages_for(JobKind.SUBTITLES) == PIPELINE_STAGE_ORDER
+    assert PipelineStage.RENDER in PIPELINE_STAGE_ORDER
+    assert PipelineStage.SYNTHESIZE not in PIPELINE_STAGE_ORDER
+
+
+def test_dubbing_stage_order_is_separate() -> None:
+    assert DUBBING_STAGE_ORDER[0] is PipelineStage.PROBE
+    assert DUBBING_STAGE_ORDER[-1] is PipelineStage.PUBLISH
+    assert PipelineStage.SYNTHESIZE in DUBBING_STAGE_ORDER
+    assert PipelineStage.RENDER not in DUBBING_STAGE_ORDER
+    assert set(PIPELINE_STAGE_ORDER) | set(DUBBING_STAGE_ORDER) == set(PipelineStage)
+    assert infer_job_kind(None) is JobKind.SUBTITLES
+    assert infer_job_kind("dubbing") is JobKind.DUBBING
 
 
 def test_chunk_ownership_is_half_open_so_no_timestamp_belongs_to_two_chunks() -> None:

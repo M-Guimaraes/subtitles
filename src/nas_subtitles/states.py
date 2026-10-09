@@ -12,13 +12,14 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 
 from .domain import (
-    PIPELINE_STAGE_ORDER,
     RETRYABLE_ERROR_CODES,
     TERMINAL_JOB_STATES,
     ErrorCode,
+    JobKind,
     JobState,
     NasSubtitlesError,
     PipelineStage,
+    stages_for,
 )
 
 __all__ = [
@@ -85,12 +86,15 @@ def is_terminal(state: JobState) -> bool:
     return state in TERMINAL_JOB_STATES
 
 
-def next_stage(stage: PipelineStage) -> PipelineStage | None:
+def next_stage(
+    stage: PipelineStage, *, job_kind: JobKind | str | None = None
+) -> PipelineStage | None:
     """The stage that follows ``stage``, or ``None`` after ``publish``."""
-    index = PIPELINE_STAGE_ORDER.index(stage)
-    if index + 1 >= len(PIPELINE_STAGE_ORDER):
+    order = stages_for(job_kind)
+    index = order.index(stage)
+    if index + 1 >= len(order):
         return None
-    return PIPELINE_STAGE_ORDER[index + 1]
+    return order[index + 1]
 
 
 def is_retryable(error_code: ErrorCode) -> bool:
