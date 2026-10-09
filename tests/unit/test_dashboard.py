@@ -133,6 +133,7 @@ def test_settings_are_read_only_and_include_language_config(config: AppConfig) -
     assert payload["writable"] is False
     assert payload["languages"]["source"] == "auto"
     assert payload["languages"]["target"] == "pt-BR"
+    assert payload["languages"]["targets"] == ["pt-BR"]
     assert payload["existing_subtitle_policy"] == "skip"
     assert payload["asr_model"] == "small"
     assert payload["dashboard"]["bind"] == "127.0.0.1"

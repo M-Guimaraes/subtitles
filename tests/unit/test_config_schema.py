@@ -21,6 +21,8 @@ def test_example_config_matches_the_documented_defaults(config: AppConfig) -> No
     assert config.target_language == "pt-BR"
     assert config.languages.source == "auto"
     assert config.languages.target == "pt-BR"
+    assert config.target_languages == ("pt-BR",)
+    assert config.languages.targets == ("pt-BR",)
     assert config.languages.low_confidence == "review"
     assert config.audio.stream == "auto"
     assert config.audio.preferred_languages == ("en", "ja")
@@ -239,10 +241,13 @@ def test_stability_window_must_not_be_negative(tmp_path: Path, config_path: Path
 
 def test_legacy_top_level_target_language_still_loads(tmp_path: Path, config_path: Path) -> None:
     text = config_path.read_text(encoding="utf-8")
-    text = text.replace(
-        "languages:\n  source: auto\n  target: pt-BR\n  low_confidence: review\n",
-        "target_language: pt-BR\n",
+    languages_block = (
+        "languages:\n  source: auto\n"
+        "  # Public identifiers only (pt-BR, en, es). Argos `pb` is internal.\n"
+        "  # A legacy single `target: pt-BR` key still loads and is folded into targets.\n"
+        "  targets:\n    - pt-BR\n  low_confidence: review\n"
     )
+    text = text.replace(languages_block, "target_language: pt-BR\n")
     legacy = tmp_path / "legacy.yaml"
     legacy.write_text(text, encoding="utf-8")
     loaded = load_config(legacy)
@@ -299,3 +304,60 @@ def test_transcribe_hash_includes_word_dedupe_version(
     assert config.stage_config_hash(PipelineStage.TRANSCRIBE) != before
     assert config.pipeline_config_hash != pipeline_before
     assert config.stage_config_hash(PipelineStage.MERGE) == merge_before
+
+
+def test_legacy_languages_target_still_loads(tmp_path: Path, config_path: Path) -> None:
+    text = config_path.read_text(encoding="utf-8").replace(
+        "  targets:\n    - pt-BR\n",
+        "  target: pt-BR\n",
+    )
+    legacy = tmp_path / "legacy-target.yaml"
+    legacy.write_text(text, encoding="utf-8")
+    loaded = load_config(legacy)
+    assert loaded.target_language == "pt-BR"
+    assert loaded.target_languages == ("pt-BR",)
+    assert loaded.languages.target == "pt-BR"
+
+
+def test_languages_target_and_targets_must_agree(tmp_path: Path, config_path: Path) -> None:
+    text = config_path.read_text(encoding="utf-8").replace(
+        "  targets:\n    - pt-BR\n",
+        "  target: pt-BR\n  targets:\n    - en\n",
+    )
+    broken = tmp_path / "disagree.yaml"
+    broken.write_text(text, encoding="utf-8")
+    with pytest.raises(ConfigurationError, match="must agree"):
+        load_config(broken)
+
+
+def test_argos_backend_code_is_rejected_in_targets(tmp_path: Path, config_path: Path) -> None:
+    text = config_path.read_text(encoding="utf-8").replace(
+        "  targets:\n    - pt-BR\n",
+        "  targets:\n    - pb\n",
+    )
+    broken = tmp_path / "pb-target.yaml"
+    broken.write_text(text, encoding="utf-8")
+    with pytest.raises(ConfigurationError, match="pb"):
+        load_config(broken)
+
+
+def test_pipeline_hash_includes_the_specific_target(config: AppConfig) -> None:
+    primary = config.pipeline_config_hash
+    english = config.pipeline_config_hash_for("en")
+    assert primary == config.pipeline_config_hash_for("pt-BR")
+    assert english != primary
+    assert config.stage_config_hash(PipelineStage.TRANSLATE, target_language="en") != (
+        config.stage_config_hash(PipelineStage.TRANSLATE)
+    )
+    assert config.stage_config_hash(PipelineStage.TRANSCRIBE, target_language="en") == (
+        config.stage_config_hash(PipelineStage.TRANSCRIBE)
+    )
+
+
+def test_multiple_targets_do_not_change_primary_hash(config: AppConfig) -> None:
+    multi = config.model_copy(
+        update={"languages": config.languages.model_copy(update={"targets": ("pt-BR", "en")})}
+    )
+    assert multi.target_languages == ("pt-BR", "en")
+    assert multi.pipeline_config_hash == config.pipeline_config_hash
+    assert multi.pipeline_config_hash_for("en") != config.pipeline_config_hash

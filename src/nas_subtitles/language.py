@@ -20,7 +20,7 @@ Deterministic policy when ``languages.source`` is ``auto``:
 7. If ASR is not confident, the decision is not confident even when metadata
    exists.
 
-Translation is skipped when the decided source and ``languages.target`` share
+Translation is skipped when the decided source and that job's target share
 the same public language family. Comparison uses public identifiers only;
 Argos ``pb`` is never treated as equivalent to ``pt-BR``.
 """

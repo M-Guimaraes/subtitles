@@ -14,7 +14,11 @@ from pathlib import Path
 from threading import Event
 
 from .config import AppConfig
-from .discovery import compute_fingerprint, find_existing_subtitles, has_portuguese_subtitle
+from .discovery import (
+    compute_fingerprint,
+    find_existing_subtitles,
+    has_subtitle_for_target,
+)
 from .domain import (
     ArtifactRecord,
     AudioChunk,
@@ -167,16 +171,18 @@ def run_job(
             code=ErrorCode.MEDIA_ROOT_MISSING,
         )
     video = root.path / job.relative_path
+    target_language = config.target_language_for_job(job.target_language)
     job = repo.transition(job_id=job.id, state=JobState.RUNNING, stage=PipelineStage.PROBE)
     probe_result = context.probe.probe(video)
     existing = find_existing_subtitles(path=video, probe_result=probe_result)
-    if has_portuguese_subtitle(existing) and job.preview_seconds is None:
+    if has_subtitle_for_target(existing, target_language) and job.preview_seconds is None:
         job = repo.transition(job_id=job.id, state=JobState.SKIPPED)
         log_event(
             _LOG,
             "media skipped",
             job_id=job.id,
-            reason="existing portuguese subtitle",
+            reason=f"existing {target_language} subtitle",
+            target_language=target_language,
         )
         return PipelineResult(
             job_id=job.id, state=job.state, last_stage=PipelineStage.PROBE, quality=QualityReport()
@@ -331,10 +337,10 @@ def run_job(
         config,
         merged,
         fingerprint_digest=fingerprint.digest(),
-        target_language=config.target_language,
+        target_language=target_language,
     )
     skip_translation = not translation_is_required(
-        source_language=language, target_language=config.target_language
+        source_language=language, target_language=target_language
     )
     if skip_translation:
         translated = tuple(
@@ -343,7 +349,7 @@ def run_job(
                 source_text=unit.source_text,
                 translated_text=unit.source_text,
                 source_language=unit.source_language,
-                target_language=config.target_language,
+                target_language=target_language,
                 engine_identity="passthrough",
             )
             for unit in units
@@ -355,14 +361,13 @@ def run_job(
             "translation skipped",
             job_id=job.id,
             source_language=language,
-            target_language=config.target_language,
+            target_language=target_language,
         )
-    elif not context.translator.supports(
-        source_language=language, target_language=config.target_language
-    ):
+    elif not context.translator.supports(source_language=language, target_language=target_language):
         raise NasSubtitlesError(
             "no direct translation pair is installed for this language",
             code=ErrorCode.TRANSLATION_PAIR_MISSING,
+            detail={"source": language, "target": target_language},
         )
     else:
         translated = translate_with_cache(units, translator=context.translator, repository=repo)
@@ -514,9 +519,9 @@ def _language_manifest(
     return JobManifest(
         job_id=context.job.id,
         fingerprint=fingerprint,
-        pipeline_config_hash=context.config.pipeline_config_hash,
+        pipeline_config_hash=context.job.pipeline_config_hash,
         source_language=source_language,
-        target_language=context.config.target_language,
+        target_language=context.config.target_language_for_job(context.job.target_language),
         selected_audio_stream_index=stream.index,
         stream_language=stream.language,
         stream_language_tag=stream.raw_language_tag,
@@ -545,7 +550,7 @@ def _record_language_decision(
         "detection_probability": decision.probability,
         "source": str(decision.source),
         "confident": decision.confident,
-        "target_language": context.config.target_language,
+        "target_language": context.config.target_language_for_job(context.job.target_language),
         "reason": decision.reason,
     }
     context.repository.append_event(
@@ -566,7 +571,7 @@ def _record_language_decision(
         detection_probability=decision.probability,
         language_source=str(decision.source),
         confident=decision.confident,
-        target_language=context.config.target_language,
+        target_language=context.config.target_language_for_job(context.job.target_language),
         reason=decision.reason,
     )
 

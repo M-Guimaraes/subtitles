@@ -406,6 +406,7 @@ def inspect(
             "selected_audio_stream_index": selected.index,
             "selected_audio_language": selected.language,
             "target_language": config.target_language,
+            "target_languages": list(config.target_languages),
             "audio_streams": [
                 {
                     "index": stream.index,
@@ -461,7 +462,7 @@ def process(
         config = _load(config_path)
         repo = repository.open_repository(config)
         with repository.StateDirLock(config.lock_path):
-            job, skipped = discovery.enqueue_path(
+            queued = discovery.enqueue_targets(
                 config,
                 repo,
                 path,
@@ -471,27 +472,58 @@ def process(
                 preview_offset_seconds=float(preview_offset_seconds),
                 require_stability=preview_seconds is None,
             )
-            if skipped is not None:
+            if not queued.jobs:
+                reason = queued.skip_reasons[0] if queued.skip_reasons else "nothing to enqueue"
                 _emit(
-                    {"ok": True, "skipped": True, "reason": skipped},
+                    {
+                        "ok": True,
+                        "skipped": True,
+                        "reason": reason,
+                        "skipped_targets": [
+                            {
+                                "target_language": item.target_language,
+                                "reason": item.skip_reason,
+                            }
+                            for item in queued.outcomes
+                            if item.skip_reason is not None
+                        ],
+                    },
                     as_json=json_output,
-                    text=skipped,
+                    text=reason,
                 )
                 return
-            assert job is not None
             from .pipeline import build_context, run_job
 
-            result = run_job(build_context(config, repo, job))
+            results = [run_job(build_context(config, repo, job)) for job in queued.jobs]
+            first = results[0]
             _emit(
                 {
                     "ok": True,
-                    "job_id": result.job_id,
-                    "state": str(result.state),
-                    "cues": result.cue_count,
-                    "output": str(result.output_path) if result.output_path else None,
+                    "job_id": first.job_id,
+                    "state": str(first.state),
+                    "cues": first.cue_count,
+                    "output": str(first.output_path) if first.output_path else None,
+                    "jobs": [
+                        {
+                            "job_id": item.job_id,
+                            "state": str(item.state),
+                            "cues": item.cue_count,
+                            "output": str(item.output_path) if item.output_path else None,
+                            "target_language": job.target_language,
+                        }
+                        for item, job in zip(results, queued.jobs, strict=True)
+                    ],
+                    "skipped_targets": [
+                        {
+                            "target_language": item.target_language,
+                            "reason": item.skip_reason,
+                        }
+                        for item in queued.outcomes
+                        if item.skip_reason is not None
+                    ],
                 },
                 as_json=json_output,
-                text=f"{result.job_id} {result.state} cues={result.cue_count}",
+                text=f"{first.job_id} {first.state} cues={first.cue_count}",
             )
 
 
@@ -508,7 +540,7 @@ def enqueue(
     with _handled(as_json=json_output):
         config = _load(config_path)
         repo = repository.open_repository(config)
-        job, skipped = discovery.enqueue_path(
+        queued = discovery.enqueue_targets(
             config,
             repo,
             path,
@@ -516,18 +548,44 @@ def enqueue(
             audio_stream_index=audio_stream_index,
             priority=priority,
         )
-        if skipped is not None:
+        if not queued.jobs:
+            reason = queued.skip_reasons[0] if queued.skip_reasons else "nothing to enqueue"
             _emit(
-                {"ok": True, "enqueued": False, "reason": skipped},
+                {
+                    "ok": True,
+                    "enqueued": False,
+                    "reason": reason,
+                    "skipped_targets": [
+                        {
+                            "target_language": item.target_language,
+                            "reason": item.skip_reason,
+                        }
+                        for item in queued.outcomes
+                        if item.skip_reason is not None
+                    ],
+                },
                 as_json=json_output,
-                text=skipped,
+                text=reason,
             )
             return
-        assert job is not None
+        first = queued.jobs[0]
         _emit(
-            {"ok": True, "enqueued": True, "job": _job_payload(job)},
+            {
+                "ok": True,
+                "enqueued": True,
+                "job": _job_payload(first),
+                "jobs": [_job_payload(job) for job in queued.jobs],
+                "skipped_targets": [
+                    {
+                        "target_language": item.target_language,
+                        "reason": item.skip_reason,
+                    }
+                    for item in queued.outcomes
+                    if item.skip_reason is not None
+                ],
+            },
             as_json=json_output,
-            text=f"{job.id} {job.state}",
+            text=f"{first.id} {first.state}",
         )
 
 
@@ -925,6 +983,7 @@ def _job_payload(record: JobRecord) -> dict[str, object]:
         "priority": record.priority,
         "approved_at": record.approved_at.isoformat() if record.approved_at else None,
         "output_path": str(record.output_path) if record.output_path else None,
+        "target_language": record.target_language,
     }
 
 

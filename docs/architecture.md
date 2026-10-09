@@ -12,14 +12,16 @@ Stopping either HTTP process leaves the daemon scanning and processing.
 One job runs at a time,
 guarded by a `flock` on `state_dir` (exit code 6 when it is already held) and
 by a `BEGIN IMMEDIATE` claim in SQLite so two processes can never lease the
-same job. Inference never holds the database lock. A heartbeat thread writes
-every 30 s so a slow job is distinguishable from a dead worker.
+same job. Each configured target language is its own job (and its own
+`pipeline_config_hash`), so a failed `en` translation does not discard a
+successful `.pt-BR.srt`. Inference never holds the database lock. A heartbeat
+thread writes every 30 s so a slow job is distinguishable from a dead worker.
 
 ```mermaid
 flowchart TD
   webhook[Sonarr/Radarr webhook] --> enqueue[enqueue_path]
   scan[Stable scan] --> enqueue
-  enqueue --> queued[queued]
+  enqueue --> queued[queued per target]
   queued --> claim[Claim and lease]
   claim --> probe[probe]
   probe --> detect[detect_language]
@@ -138,9 +140,10 @@ content is a conflict.
 
 When `publish_mode` is `sidecar`, the worker publishes automatically after a
 job that has no structural errors. Staging and `.preview` outputs are
-unchanged. An existing canonical `.pt-BR.srt` is never overwritten (`skip`
-policy): `EEXIST` from `os.link` is an `output_conflict`. The daemon
-re-queues jobs left `running` after a crash so they cannot stay stuck.
+unchanged. An existing canonical sidecar for *that* target (`.pt-BR.srt`,
+`.en.srt`, …) is never overwritten (`skip` policy): `EEXIST` from `os.link`
+is an `output_conflict`. The daemon re-queues jobs left `running` after a
+crash so they cannot stay stuck.
 
 Manifests stay in `state_dir` and staging. They are never written next to a
 video.

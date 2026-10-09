@@ -34,17 +34,21 @@ from .domain import (
     ScanObservation,
     SubtitleOrigin,
 )
-from .language import subtitle_suffix_language
+from .language import public_language_family, subtitle_suffix_language
 from .logging_setup import log_event, path_token
 from .media import FfprobeMediaProbe, select_audio_stream
 
 __all__ = [
+    "EnqueueResult",
     "ScanSummary",
+    "TargetEnqueue",
     "canonical_target_sidecar",
     "compute_fingerprint",
     "enqueue_path",
+    "enqueue_targets",
     "find_existing_subtitles",
     "has_portuguese_subtitle",
+    "has_subtitle_for_target",
     "has_target_sidecar",
     "is_candidate_name",
     "is_stable",
@@ -53,6 +57,7 @@ __all__ = [
     "observe",
     "resolve_explicit_path",
     "scan",
+    "subtitle_satisfies_language",
 ]
 
 _LOG = logging.getLogger(__name__)
@@ -60,6 +65,30 @@ _SKIP_DIR_NAMES = frozenset({"download", "incomplete", "downloads"})
 _TEMPORARY_SUFFIXES = frozenset({".part", ".partial", ".tmp", ".temp", ".crdownload", ".!qb"})
 _SUBTITLE_EXTENSIONS = frozenset({".srt", ".vtt", ".ass"})
 _TOKEN_SPLIT = re.compile(r"[^a-z0-9]+")
+
+
+@dataclass(frozen=True, slots=True)
+class TargetEnqueue:
+    """Outcome of enqueueing one configured target for a media path."""
+
+    target_language: str
+    job: JobRecord | None = None
+    skip_reason: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class EnqueueResult:
+    """Per-target outcomes for one media path."""
+
+    outcomes: tuple[TargetEnqueue, ...] = ()
+
+    @property
+    def jobs(self) -> tuple[JobRecord, ...]:
+        return tuple(item.job for item in self.outcomes if item.job is not None)
+
+    @property
+    def skip_reasons(self) -> tuple[str, ...]:
+        return tuple(item.skip_reason for item in self.outcomes if item.skip_reason is not None)
 
 
 @dataclass(frozen=True, slots=True)
@@ -305,6 +334,27 @@ def has_portuguese_subtitle(subtitles: tuple[ExistingSubtitle, ...]) -> bool:
     return any(item.satisfies_target for item in subtitles)
 
 
+def subtitle_satisfies_language(item: ExistingSubtitle, target_language: str) -> bool:
+    """Whether ``item`` already satisfies the public ``target_language`` family.
+
+    Portuguese keeps the historical ``satisfies_target`` rule (including
+    suffix tokens such as ``pt-BR``). Other targets match on public family
+    only. Forced tracks never satisfy a generated sidecar.
+    """
+    if item.is_forced:
+        return False
+    family = public_language_family(target_language)
+    if family == PORTUGUESE:
+        return item.satisfies_target
+    item_family = public_language_family(item.language)
+    return item_family is not None and item_family == family
+
+
+def has_subtitle_for_target(subtitles: tuple[ExistingSubtitle, ...], target_language: str) -> bool:
+    """True when a complete, non-forced subtitle already covers ``target_language``."""
+    return any(subtitle_satisfies_language(item, target_language) for item in subtitles)
+
+
 def canonical_target_sidecar(path: Path, target_language: str) -> Path:
     """``<stem>.<logical-target-language>.srt`` beside the video, never a backend code."""
     return path.with_suffix(f".{target_language}.srt")
@@ -373,66 +423,80 @@ def scan(
             except NasSubtitlesError:
                 skipped_unreadable += 1
                 continue
-            skip_reason = _existing_subtitle_skip_reason(config, path, probe_result)
-            queued_already = _already_queued(repository, fingerprint, config.pipeline_config_hash)
-            if skip_reason is not None:
-                skipped_existing += 1
-                if not queued_already:
+            logged_stable = False
+            for target in config.target_languages:
+                pipeline_hash = config.pipeline_config_hash_for(target)
+                skip_reason = _existing_subtitle_skip_reason(
+                    config, path, probe_result, target_language=target
+                )
+                queued_already = _already_queued(repository, fingerprint, pipeline_hash)
+                if skip_reason is not None:
+                    skipped_existing += 1
+                    if not queued_already:
+                        if not logged_stable:
+                            log_event(
+                                _LOG,
+                                "media became stable",
+                                root_id=root.root_id,
+                                path_token=path_token(path),
+                            )
+                            logged_stable = True
+                        log_event(
+                            _LOG,
+                            "existing target subtitle found",
+                            root_id=root.root_id,
+                            path_token=path_token(path),
+                            reason=skip_reason,
+                            target_language=target,
+                        )
+                        log_event(
+                            _LOG,
+                            "media skipped",
+                            root_id=root.root_id,
+                            path_token=path_token(path),
+                            reason=skip_reason,
+                            target_language=target,
+                        )
+                        if not dry_run:
+                            skipped_job = repository.enqueue(
+                                fingerprint=fingerprint,
+                                pipeline_config_hash=pipeline_hash,
+                                target_language=target,
+                            )
+                            if skipped_job.state is JobState.QUEUED:
+                                repository.transition(
+                                    job_id=skipped_job.id,
+                                    state=JobState.SKIPPED,
+                                    error_detail=skip_reason,
+                                )
+                    continue
+                if queued_already:
+                    already_queued += 1
+                    continue
+                if not logged_stable:
                     log_event(
                         _LOG,
                         "media became stable",
                         root_id=root.root_id,
                         path_token=path_token(path),
                     )
-                    log_event(
-                        _LOG,
-                        "existing target subtitle found",
-                        root_id=root.root_id,
-                        path_token=path_token(path),
-                        reason=skip_reason,
+                    logged_stable = True
+                if not dry_run:
+                    job = repository.enqueue(
+                        fingerprint=fingerprint,
+                        pipeline_config_hash=pipeline_hash,
+                        target_language=target,
                     )
                     log_event(
                         _LOG,
-                        "media skipped",
+                        "job queued",
+                        job_id=job.id,
                         root_id=root.root_id,
                         path_token=path_token(path),
-                        reason=skip_reason,
+                        target_language=target,
                     )
-                    if not dry_run:
-                        skipped_job = repository.enqueue(
-                            fingerprint=fingerprint,
-                            pipeline_config_hash=config.pipeline_config_hash,
-                        )
-                        if skipped_job.state is JobState.QUEUED:
-                            repository.transition(
-                                job_id=skipped_job.id,
-                                state=JobState.SKIPPED,
-                                error_detail=skip_reason,
-                            )
-                continue
-            if queued_already:
-                already_queued += 1
-                continue
-            log_event(
-                _LOG,
-                "media became stable",
-                root_id=root.root_id,
-                path_token=path_token(path),
-            )
-            if not dry_run:
-                job = repository.enqueue(
-                    fingerprint=fingerprint,
-                    pipeline_config_hash=config.pipeline_config_hash,
-                )
-                log_event(
-                    _LOG,
-                    "job queued",
-                    job_id=job.id,
-                    root_id=root.root_id,
-                    path_token=path_token(path),
-                )
-            enqueued += 1
-            enqueued_paths.append(root.relative_path_for(path))
+                enqueued += 1
+                enqueued_paths.append(root.relative_path_for(path))
 
     log_event(
         _LOG,
@@ -471,11 +535,47 @@ def enqueue_path(
     now: datetime | None = None,
     probe: FfprobeMediaProbe | None = None,
 ) -> tuple[JobRecord | None, str | None]:
-    """Inspect one explicit path and enqueue it when it is eligible.
+    """Inspect one explicit path and enqueue every eligible target.
 
-    Returns ``(job, skip_reason)``. ``skip_reason`` is set when an existing
-    Portuguese subtitle means the file must not enter the queue.
+    Returns ``(job, skip_reason)`` for the first enqueued target. When every
+    configured target is skipped, ``skip_reason`` is the first skip. Call
+    :func:`enqueue_targets` when the caller needs every language.
     """
+    result = enqueue_targets(
+        config,
+        repository,
+        path,
+        source_language=source_language,
+        audio_stream_index=audio_stream_index,
+        priority=priority,
+        preview_seconds=preview_seconds,
+        preview_offset_seconds=preview_offset_seconds,
+        require_stability=require_stability,
+        now=now,
+        probe=probe,
+    )
+    if result.jobs:
+        return result.jobs[0], None
+    if result.skip_reasons:
+        return None, result.skip_reasons[0]
+    return None, None
+
+
+def enqueue_targets(
+    config: AppConfig,
+    repository: JobRepository,
+    path: Path,
+    *,
+    source_language: str | None = None,
+    audio_stream_index: int | None = None,
+    priority: int = 0,
+    preview_seconds: float | None = None,
+    preview_offset_seconds: float | None = None,
+    require_stability: bool = True,
+    now: datetime | None = None,
+    probe: FfprobeMediaProbe | None = None,
+) -> EnqueueResult:
+    """Inspect one path and enqueue one independent job per configured target."""
     moment = now or datetime.now(tz=UTC)
     root, resolved = resolve_explicit_path(config, path)
     if not resolved.is_file():
@@ -494,55 +594,72 @@ def enqueue_path(
     inspector = probe or FfprobeMediaProbe()
     probe_result = inspector.probe(resolved)
     stream = select_audio_stream(probe_result, override_index=audio_stream_index, config=config)
-    skip_reason = _existing_subtitle_skip_reason(config, resolved, probe_result)
-    if skip_reason is not None:
-        log_event(
-            _LOG,
-            "existing target subtitle found",
-            root_id=root.root_id,
-            path_token=path_token(resolved),
-            reason=skip_reason,
-        )
-        log_event(
-            _LOG,
-            "media skipped",
-            root_id=root.root_id,
-            path_token=path_token(resolved),
-            reason=skip_reason,
-        )
-        return None, skip_reason
     fingerprint = compute_fingerprint(root=root, path=resolved, audio_stream_index=stream.index)
-    job = repository.enqueue(
-        fingerprint=fingerprint,
-        pipeline_config_hash=config.pipeline_config_hash,
-        priority=priority,
-        source_language_override=source_language,
-        audio_stream_index_override=audio_stream_index,
-        preview_seconds=preview_seconds,
-        preview_offset_seconds=preview_offset_seconds,
-    )
-    log_event(
-        _LOG,
-        "job queued",
-        job_id=job.id,
-        root_id=root.root_id,
-        path_token=path_token(resolved),
-    )
-    return job, None
+    outcomes: list[TargetEnqueue] = []
+    for target in config.target_languages:
+        skip_reason = _existing_subtitle_skip_reason(
+            config, resolved, probe_result, target_language=target
+        )
+        if skip_reason is not None:
+            log_event(
+                _LOG,
+                "existing target subtitle found",
+                root_id=root.root_id,
+                path_token=path_token(resolved),
+                reason=skip_reason,
+                target_language=target,
+            )
+            log_event(
+                _LOG,
+                "media skipped",
+                root_id=root.root_id,
+                path_token=path_token(resolved),
+                reason=skip_reason,
+                target_language=target,
+            )
+            outcomes.append(TargetEnqueue(target_language=target, skip_reason=skip_reason))
+            continue
+        job = repository.enqueue(
+            fingerprint=fingerprint,
+            pipeline_config_hash=config.pipeline_config_hash_for(target),
+            priority=priority,
+            source_language_override=source_language,
+            audio_stream_index_override=audio_stream_index,
+            preview_seconds=preview_seconds,
+            preview_offset_seconds=preview_offset_seconds,
+            target_language=target,
+        )
+        log_event(
+            _LOG,
+            "job queued",
+            job_id=job.id,
+            root_id=root.root_id,
+            path_token=path_token(resolved),
+            target_language=target,
+        )
+        outcomes.append(TargetEnqueue(target_language=target, job=job))
+    return EnqueueResult(outcomes=tuple(outcomes))
 
 
 def _existing_subtitle_skip_reason(
-    config: AppConfig, path: Path, probe_result: ProbeResult | None
+    config: AppConfig,
+    path: Path,
+    probe_result: ProbeResult | None,
+    *,
+    target_language: str,
 ) -> str | None:
     """Return a skip reason when policy forbids generating over an existing target."""
     assert config.existing_subtitle_policy is ExistingSubtitlePolicy.SKIP
-    if has_target_sidecar(path, config.target_language):
-        return f"existing target sidecar ({config.target_language})"
+    if has_target_sidecar(path, target_language):
+        return f"existing target sidecar ({target_language})"
     existing = find_existing_subtitles(path=path, probe_result=probe_result)
-    if has_portuguese_subtitle(existing):
-        matching = next(item for item in existing if item.satisfies_target)
-        return matching.reason or "existing portuguese subtitle"
-    return None
+    matching = next(
+        (item for item in existing if subtitle_satisfies_language(item, target_language)),
+        None,
+    )
+    if matching is None:
+        return None
+    return matching.reason or f"existing {target_language} subtitle"
 
 
 def _count_ignored_names(

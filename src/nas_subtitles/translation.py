@@ -131,7 +131,11 @@ class ArgosTranslator:
             return
         configure_argos_environment(self.config)
         configure_stanza_offline()
-        translation_package_path(self.config, source=ENGLISH, target=self.config.target_language)
+        for target in self.config.target_languages:
+            try:
+                translation_package_path(self.config, source=ENGLISH, target=target)
+            except NasSubtitlesError:
+                continue
         import argostranslate.translate  # noqa: F401  # registers installed packages
 
         configure_argos_environment(self.config)
