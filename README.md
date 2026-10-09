@@ -1,188 +1,169 @@
 # nas-subtitles
 
-CLI e um único worker que geram legendas em português a partir do áudio de
-vídeos armazenados localmente. Só modelos locais: Whisper (faster-whisper) e
-Argos Translate. Sem provedores de legenda, sem API de tradução, sem
-telemetria.
+**Legendas em português, geradas localmente a partir do áudio dos seus vídeos.**
 
-Um vídeo entra; um `.pt-BR.srt` sai. O áudio é escolhido e extraído com
-FFmpeg, transcrito localmente, traduzido localmente, renderizado em SRT e
-publicado sem nunca sobrescrever um arquivo existente e sem nunca alterar o
-vídeo.
+O `nas-subtitles` combina um CLI e um worker único para selecionar a faixa de áudio, transcrever com faster-whisper, traduzir com Argos Translate e gerar arquivos SRT. O processamento usa modelos locais, sem provedores de legendas, APIs de tradução ou telemetria.
 
-Dublagem (`nas-subs dub`, item 006 do roadmap) **não existe** neste código.
+```text
+Vídeo → FFmpeg → Transcrição → Tradução → Validação → Legenda .pt-BR.srt
+```
 
-## O que `pt-BR` faz e o que não faz
+A mídia original permanece intacta. A publicação nunca sobrescreve um arquivo existente.
 
-**O sufixo `pt-BR` é o destino desejado, não uma garantia linguística.** O
-pacote Argos instalado é o par direto `en -> pb` (código interno do Argos
-para português do Brasil). Na configuração pública o destino continua
-`pt-BR`; `pb` nunca aparece em nome de arquivo, em `languages.targets` nem
-nos jobs. O texto produzido é português e pode usar vocabulário e
-construção europeus. Não há glossário nem regras de adaptação para
-português brasileiro.
+## Visão geral
 
-O projeto também não promete tradução profissional, ausência de
-alucinação nem sincronia perfeita. Por isso o modo de publicação padrão é
-`staging` e existem portas de revisão: você lê o resultado antes de
-qualquer arquivo ser escrito ao lado dos vídeos.
+| Característica | Comportamento |
+|---|---|
+| Interface | CLI `nas-subs` |
+| Processamento | Worker único, com execução serial |
+| Transcrição | faster-whisper, com modelo local |
+| Tradução | Argos Translate, com par direto local |
+| Saída | Arquivo SRT |
+| Publicação padrão | Staging, para revisão |
+| Execução atual | CPU |
+| Rede durante inferência | Não é necessária |
 
-## Estado atual
+## Estado do projeto
 
-O software está implementado e foi exercitado num Mac Apple Silicon
-(arm64). **Não foi implantado num NAS.** Não há medição nesse servidor, nem
-piloto num episódio real da biblioteca, nem afirmação sobre amd64, GPU ou
-outro hardware. O que foi medido está em
-[docs/benchmark.md](docs/benchmark.md).
+Os itens **000–005** do [roadmap](ROADMAP.md) estão concluídos. A implementação foi exercitada em um Mac Apple Silicon (`arm64`).
 
-Os itens 000–005 do [ROADMAP.md](ROADMAP.md) estão feitos. Webhooks
-Sonarr/Radarr (004) existem no código e nos testes unitários; **não foram
-exercitados contra um Sonarr/Radarr de verdade nem contra um NAS.**
+| Área | Situação |
+|---|---|
+| Geração de legendas | Implementada |
+| Dashboard opcional | Disponível |
+| Webhooks Sonarr/Radarr | Implementados, com testes unitários |
+| Implantação em NAS | Ainda não realizada |
+| Piloto em episódio real da biblioteca | Ainda não realizado |
+| Validação em amd64 ou GPU | Ainda não realizada |
+| Dublagem | Planejada no item 006; não implementada |
+
+**O comando `nas-subs dub` ainda não existe.** Os webhooks também não foram exercitados contra instâncias reais de Sonarr/Radarr ou um NAS. Consulte [os resultados de benchmark](docs/benchmark.md) para conhecer as medições disponíveis.
+
+## Português brasileiro: alcance e limitações
+
+O destino público é `pt-BR`. Internamente, o pacote Argos utiliza o par direto `en → pb`, em que `pb` representa português do Brasil. Esse código interno não aparece nos nomes de arquivos, em `languages.targets` ou nos jobs.
+
+O sufixo `.pt-BR.srt` expressa o idioma desejado, mas **não garante adaptação linguística ao português brasileiro**. O resultado pode conter vocabulário ou construções de português europeu. Não há glossário nem regras de adaptação regional.
+
+A qualidade da tradução, da transcrição e da sincronização deve ser revisada. Por esse motivo, `staging` é o modo padrão: o resultado fica no diretório de saída antes de qualquer publicação ao lado do vídeo.
 
 ## Requisitos
 
-- Python **3.11** (a restrição do projeto é `>=3.11,<3.12`) com
-  [uv](https://docs.astral.sh/uv/) e FFmpeg, **ou** Docker com Compose v2.
-- Cerca de 4 GiB de RAM e 3 GiB livres em disco para intermediários.
-- CPU apenas. Não há caminho GPU.
+Escolha uma das formas de execução:
 
-**Torch:** no Linux (incluindo a imagem Docker) a dependência é
-`torch==2.14.1+cpu` no índice CPU do PyTorch, para não puxar CUDA/NVIDIA.
-No macOS nativo (`sys_platform == 'darwin'`) é `torch==2.14.1` da
-distribuição padrão. São ambientes distintos; um `uv sync` no Mac não
-instala o wheel `+cpu` do Linux.
+- **Local:** Python 3.11 (`>=3.11,<3.12`), [uv](https://docs.astral.sh/uv/) e FFmpeg/ffprobe.
+- **Container:** Docker e Compose v2.
 
-O único comando autorizado a usar a rede é `nas-subs models install`.
-Import, `doctor`, `daemon` e o restante falham com `model_missing` se o
-modelo não estiver no disco. Não há fallback para API remota.
+Referência de recursos: aproximadamente **4 GiB de RAM** e **3 GiB livres** para intermediários. A implementação atual utiliza CPU e não possui caminho de execução GPU.
 
-## Passo a passo: Docker (Mac ou Linux)
+### Dependências por plataforma
 
-Caminhos no YAML são **caminhos dentro do contêiner** e precisam ser
-absolutos. A biblioteca do host é montada em `/media`. O padrão de
-`--config` do CLI é `/config/config.yaml`, que é o que o Compose monta.
+| Ambiente | Distribuição do Torch |
+|---|---|
+| Linux e imagem Docker | `torch==2.14.1+cpu`, pelo índice CPU do PyTorch |
+| macOS nativo | `torch==2.14.1`, pela distribuição padrão |
+
+Os ambientes têm dependências distintas. Um `uv sync` no Mac não instala o wheel Linux `+cpu`.
+
+### Modelos e acesso à rede
+
+O único comando da aplicação autorizado a acessar a rede é `nas-subs models install`. Importação de módulos, diagnóstico e inicialização do worker não baixam modelos automaticamente.
+
+Se um modelo estiver ausente, a aplicação retorna `model_missing`. Não há fallback para serviços remotos.
+
+## Instalação com Docker
+
+### 1. Preparar a configuração
+
+Na raiz do repositório:
 
 ```bash
-cp config/config.example.yaml config/config.yaml   # edite media_roots
-cp .env.example .env                               # APP_UID, APP_GID, MEDIA_HOST_PATH
+cp config/config.example.yaml config/config.yaml
+cp .env.example .env
 mkdir -p data/state data/work data/models data/output
 ```
 
-Em `config/config.yaml` deixe `media_roots` como o contêiner vê a
-biblioteca (no exemplo: `/media/library/series` e `/media/library/movies`).
-Em `.env` use `id -u` / `id -g` para `APP_UID`/`APP_GID` e o caminho
-absoluto da biblioteca no host em `MEDIA_HOST_PATH`. Não commite `.env`.
-`data/` deve ficar em disco local (SQLite não vai bem em SMB/NFS).
+Ajuste os arquivos:
+
+| Arquivo | Configuração |
+|---|---|
+| `config/config.yaml` | `media_roots` com caminhos absolutos vistos pelo container |
+| `.env` | `APP_UID`, `APP_GID` e `MEDIA_HOST_PATH` |
+
+Use `id -u` e `id -g` para descobrir UID e GID. `MEDIA_HOST_PATH` deve conter o caminho absoluto da biblioteca no host. Não versione o `.env`.
+
+A biblioteca é montada em `/media`. Exemplos de roots no container: `/media/library/series` e `/media/library/movies`. O arquivo de configuração padrão do CLI é `/config/config.yaml`.
+
+Mantenha `data/` em disco local, especialmente o estado SQLite; não utilize SMB/NFS para o banco da fila.
 
 ```bash
 docker compose build
-docker compose config          # confira se os binds expandiram como você espera
+docker compose config
 ```
 
-Um `MEDIA_HOST_PATH` inexistente falha o bind (`create_host_path: false`) em
-vez de criar um diretório vazio.
+Confira os volumes na configuração expandida. Um `MEDIA_HOST_PATH` inexistente causa falha no bind, em vez de criar um diretório vazio (`create_host_path: false`).
 
-### Instalar modelos (única etapa com rede)
+### 2. Instalar os modelos
+
+Esta é a etapa da aplicação que utiliza rede:
 
 ```bash
 docker compose run --rm -e HF_HUB_OFFLINE=0 subtitles \
-    nas-subs models install --config /config/config.yaml
+  nas-subs models install --config /config/config.yaml
 ```
 
-Isso baixa o Whisper configurado (padrão `small`) e o par Argos direto
-(`en -> pb` quando o destino público é `pt-BR`). Pares extras em
-`languages.targets` **não** são instalados por este comando. Se o par
-direto não existir no índice do Argos, a instalação falha com instrução;
-não use idioma-pivô nem API remota.
+O comando instala o Whisper configurado — `small` por padrão — e o par Argos direto do destino primário. Para `pt-BR`, o par interno é `en → pb`.
 
-### Verificar, diagnosticar, inspecionar
+Destinos adicionais em `languages.targets` não são instalados por esse comando. Se o par direto não estiver disponível no índice Argos, a instalação falha com orientação; não há tradução por idioma-pivô ou API remota.
 
-A partir daqui a forma normal de rodar é **sem rede** (`compose.offline.yaml`
-coloca `network_mode: none` no worker):
+### 3. Validar o ambiente offline
+
+O override `compose.offline.yaml` configura `network_mode: none` no worker.
 
 ```bash
 docker compose -f compose.yaml -f compose.offline.yaml run --rm subtitles \
-    nas-subs models verify --offline --config /config/config.yaml
+  nas-subs models verify --offline --config /config/config.yaml
 
 docker compose -f compose.yaml -f compose.offline.yaml run --rm subtitles \
-    nas-subs doctor --config /config/config.yaml
+  nas-subs doctor --config /config/config.yaml
 
 docker compose -f compose.yaml -f compose.offline.yaml run --rm subtitles \
-    nas-subs inspect /media/library/series/EPISODIO.mkv --config /config/config.yaml
+  nas-subs inspect /media/library/series/EPISODIO.mkv \
+  --config /config/config.yaml
 ```
 
-`doctor` checa Python, CPU, memória, `media_roots`, diretórios, espaço
-livre, ffmpeg/ffprobe, banco da fila, dashboard, token de webhook e se os
-modelos carregam offline. Falha de modelo é `fail` (`model_missing`);
-token de webhook ausente é `warn` (o listener recusa subir, o worker não).
+O `doctor` verifica ambiente, recursos, diretórios, espaço livre, FFmpeg/ffprobe, banco, dashboard, configuração de webhook e carregamento offline dos modelos.
 
-### Preview (cinco minutos, só staging)
+- Modelo ausente: falha `model_missing`.
+- Token de webhook ausente: aviso; o listener não inicia, mas o worker pode funcionar.
 
-O preview cai em `data/output` (montado em `/output`) com `.preview` no
-nome. **Nunca** vira sidecar e **nunca** satisfaz a biblioteca.
+### 4. Gerar uma prévia
+
+Comece com cinco minutos:
 
 ```bash
 docker compose -f compose.yaml -f compose.offline.yaml run --rm subtitles \
-    nas-subs process /media/library/series/EPISODIO.mkv \
-    --preview-seconds 300 --config /config/config.yaml
+  nas-subs process /media/library/series/EPISODIO.mkv \
+  --preview-seconds 300 --config /config/config.yaml
 ```
 
-Leia o SRT em `data/output` antes de processar o arquivo inteiro.
+O resultado aparece em `data/output`, com `.preview` no nome. A prévia permanece em staging, não é publicada como sidecar e não conta como processamento completo da biblioteca.
 
-### Staging versus sidecar
+Revise o SRT antes de processar o arquivo inteiro.
 
-`publish_mode: staging` é o padrão em `config/config.example.yaml`. O SRT
-vai para `output_dir` (`data/output` no host). O bind de `/media` no
-`compose.yaml` é **somente leitura**.
+### 5. Iniciar o worker
 
-Para escrever ao lado do vídeo (`<stem>.pt-BR.srt`) **duas** coisas
-precisam ser verdade ao mesmo tempo:
-
-1. `publish_mode: sidecar` em `config/config.yaml`
-2. o override `compose.sidecar.yaml` (troca o bind de `/media` para
-   leitura-escrita)
-
-Uma das duas sozinha não publica sidecar. O processo ainda **nunca**
-remuxa, recodifica, renomeia nem apaga o vídeo. Publicação usa hard-link
-exclusivo: se o nome-alvo já existir, o resultado é `output_conflict`
-(código de saída 5), nunca overwrite.
-
-Publicar um job já aprovado, sem retranscrever:
-
-```bash
-docker compose -f compose.yaml -f compose.sidecar.yaml run --rm subtitles \
-    nas-subs publish JOB_ID --config /config/config.yaml
-```
-
-Daemon contínuo em staging (padrão, mídia somente leitura):
+Para executar scan periódico e processamento serial em staging:
 
 ```bash
 docker compose -f compose.yaml -f compose.offline.yaml up -d
 ```
 
-Daemon contínuo com sidecar (zero-touch, mídia gravável):
+Consulte o [runbook](docs/runbook.md) para dry-run do scanner, piloto e recuperação.
 
-```bash
-docker compose -f compose.yaml -f compose.offline.yaml -f compose.sidecar.yaml up -d
-```
+## Execução nativa no macOS
 
-Dashboard opcional (outro contêiner; pará-lo não para o worker). Porta só
-em loopback do host (`127.0.0.1:8787`):
-
-```bash
-docker compose -f compose.yaml -f compose.offline.yaml -f compose.dashboard.yaml up -d
-```
-
-A sequência completa (dry-run do scanner, piloto, recuperação) está em
-[docs/runbook.md](docs/runbook.md).
-
-## Passo a passo: local no Mac (sem Docker)
-
-Mesmo código, caminhos de host. O padrão `--config` continua
-`/config/config.yaml`; **passe sempre** um YAML absoluto. Copie o exemplo
-e reescreva **todos** os caminhos para o Mac (`media_roots`, `state_dir`,
-`work_dir`, `models_dir`, `output_dir`). Os valores `/media`, `/state`,
-`/work`, `/models` e `/output` são do contêiner e não existem no host.
+Na execução local, todos os caminhos precisam apontar para diretórios do host. Os caminhos `/media`, `/state`, `/work`, `/models` e `/output` do exemplo Docker devem ser substituídos.
 
 ```bash
 uv sync --frozen --group dev
@@ -190,7 +171,7 @@ cp config/config.example.yaml config/config.yaml
 mkdir -p data/state data/work data/models data/output
 ```
 
-Exemplo de trecho local (ajuste para a sua máquina):
+Exemplo de configuração — ajuste os caminhos para sua máquina:
 
 ```yaml
 media_roots: [/Users/voce/Videos]
@@ -201,115 +182,183 @@ output_dir: /Users/voce/nas-subtitles/data/output
 publish_mode: staging
 ```
 
+Passe sempre o caminho absoluto de `--config`; o padrão do CLI continua sendo `/config/config.yaml`.
+
 ```bash
 uv run nas-subs models install --config /caminho/absoluto/config/config.yaml
 uv run nas-subs models verify --offline --config /caminho/absoluto/config/config.yaml
 uv run nas-subs doctor --config /caminho/absoluto/config/config.yaml
+
 uv run nas-subs inspect /Users/voce/Videos/EPISODIO.mkv \
-    --config /caminho/absoluto/config/config.yaml
+  --config /caminho/absoluto/config/config.yaml
+
 uv run nas-subs process /Users/voce/Videos/EPISODIO.mkv \
-    --preview-seconds 300 --config /caminho/absoluto/config/config.yaml
+  --preview-seconds 300 --config /caminho/absoluto/config/config.yaml
 ```
 
-O worker contínuo (scan periódico + processamento serial):
+Para execução contínua:
 
 ```bash
 uv run nas-subs daemon --config /caminho/absoluto/config/config.yaml
 ```
 
-`daemon` e `worker` são o mesmo processo. Sidecar local não usa
-`compose.sidecar.yaml`: basta `publish_mode: sidecar` e permissão de
-escrita nos diretórios de mídia. O vídeo em si continua intocado.
+`daemon` e `worker` são aliases do mesmo processo.
 
-## Integração com Sonarr e Radarr
+## Publicação: staging e sidecar
 
-O contrato implementado é o item **004**: um processo HTTP separado,
-`nas-subs webhooks`, e o Compose `compose.webhooks.yaml`. Não são rotas do
-dashboard. Parar o listener **não** para o worker nem o dashboard.
+| Modo | Destino | Uso |
+|---|---|---|
+| `staging` | `output_dir` | Revisão antes da publicação; padrão |
+| `sidecar` | Ao lado do vídeo, como `<stem>.pt-BR.srt` | Publicação na biblioteca |
 
-O webhook **só enfileira**. Quem transcreve é o `daemon`. O scan periódico
-continua sendo a fonte de verdade: um POST perdido ou rejeitado é
-recuperado na próxima reconciliação.
+### Sidecar com Docker
 
-**Não há integração por Custom Script do Sonarr/Radarr.** Não existe
-script oficial neste repositório para Connect → Custom Script. O caminho
-implementado é Connect → Webhook (POST JSON). Chamar `nas-subs enqueue` à
-mão é o CLI genérico, não o contrato 004.
+São necessárias as duas configurações:
 
-**Isto não foi testado contra um Sonarr/Radarr ao vivo nem num NAS.** Os
-testes cobrem payload, token, mapeamento de caminho e idempotência com
-dobras sintéticas.
+1. `publish_mode: sidecar` no YAML.
+2. Override `compose.sidecar.yaml`, que permite escrita no volume de mídia.
 
-### Subir o listener
-
-Defina o segredo **antes**. O processo recusa iniciar sem token
-(`NAS_SUBS_WEBHOOK_TOKEN` no ambiente, ou `webhooks.token` no YAML; a
-variável de ambiente ganha). Prefira o `.env`, não o YAML versionado.
+Para publicar um job aprovado sem retranscrever, mantendo o worker sem rede:
 
 ```bash
-# em .env, descomente e preencha:
-# NAS_SUBS_WEBHOOK_TOKEN=um-segredo-longo
+docker compose -f compose.yaml -f compose.offline.yaml -f compose.sidecar.yaml \
+  run --rm subtitles nas-subs publish JOB_ID --config /config/config.yaml
 ```
 
-Docker (porta publicada só em loopback do host: `127.0.0.1:8788`):
+Para execução contínua em sidecar:
+
+```bash
+docker compose -f compose.yaml -f compose.offline.yaml -f compose.sidecar.yaml up -d
+```
+
+### Sidecar na execução local
+
+Configure `publish_mode: sidecar` e garanta permissão de escrita nos diretórios de mídia. O override Compose não se aplica à execução nativa.
+
+### Proteção contra sobrescrita
+
+A publicação utiliza um arquivo temporário e hard-link exclusivo. Se o nome final já existir, o resultado é `output_conflict`, com código de saída `5`. O arquivo existente é preservado.
+
+O vídeo nunca é remuxado, recodificado, renomeado ou apagado, e seus metadados não são alterados.
+
+## Comandos disponíveis
+
+| Comando | Função |
+|---|---|
+| `nas-subs doctor` | Diagnóstico de ambiente, recursos, publicação e modelos |
+| `nas-subs models install` | Instalação de Whisper e do par Argos direto |
+| `nas-subs models verify` | Verificação dos modelos offline |
+| `nas-subs inspect PATH` | Streams, duração e seleção da faixa de áudio |
+| `nas-subs process PATH` | Processamento imediato sob o mesmo lock do worker |
+| `nas-subs enqueue PATH` | Enfileiramento com verificação de estabilidade |
+| `nas-subs scan` | Uma passagem pelos roots; `--dry-run` não enfileira |
+| `nas-subs worker` / `daemon` | Scan periódico e processamento serial |
+| `nas-subs jobs list\|show\|retry\|cancel\|approve` | Consulta e gerenciamento de jobs |
+| `nas-subs publish JOB_ID` | Publicação de job aprovado sem retranscrição |
+| `nas-subs benchmark PATH` | Medição em uma janela curta na máquina atual |
+| `nas-subs health` | Heartbeat e banco; utilizado pelo healthcheck Docker |
+| `nas-subs cleanup` | Limpeza restrita a `work_dir`; dry-run até `--apply` |
+| `nas-subs backup` | Backup consistente de configuração, manifesto e SQLite |
+| `nas-subs dashboard` | Interface opcional; não processa jobs |
+| `nas-subs webhooks` | Listener Sonarr/Radarr; apenas enfileira |
+
+Todos os comandos aceitam `--json` e não apresentam prompts interativos.
+
+### Códigos de saída
+
+| Código | Significado |
+|---|---|
+| `0` | Sucesso |
+| `2` | Argumentos ou configuração inválidos |
+| `3` | Falha de preflight |
+| `4` | Falha de processamento |
+| `5` | Revisão necessária ou conflito |
+| `6` | Lock ocupado por outro worker |
+
+`scan` executa uma passagem; `--once` é aceito. O loop periódico pertence ao `daemon`.
+
+## Configuração
+
+O arquivo [config/config.example.yaml](config/config.example.yaml) documenta as opções. Todos os caminhos devem ser absolutos.
+
+| Opção | Padrão |
+|---|---|
+| Publicação | `staging` |
+| Modelo Whisper | `small` |
+| Dispositivo / precisão | `cpu` / `int8` |
+| Chunks / contexto | 300 s / 2 s de overlap |
+| Formatação | Até 2 linhas de 42 caracteres |
+| Idioma de origem | `auto` |
+| Destinos | `[pt-BR]` |
+| Pares permitidos | `[en:pt]`; `pb` é interno ao Argos |
+| Intervalo de scan | 600 s |
+| Janela de estabilidade | 600 s |
+| Idade mínima do arquivo | 600 s |
+| Concorrência | 1 worker |
+| Webhooks | `127.0.0.1:8788`, sem mapas de caminho |
+
+Vários destinos geram um job por idioma e um arquivo `.<tag>.srt`. A instalação automática de modelos continua limitada ao par do destino primário.
+
+## Componentes opcionais
+
+### Dashboard
+
+O dashboard executa em outro container. Interrompê-lo não interrompe o worker. A porta é publicada apenas no loopback do host, em `127.0.0.1:8787`.
+
+```bash
+docker compose -f compose.yaml -f compose.offline.yaml -f compose.dashboard.yaml up -d
+```
+
+### Webhooks Sonarr/Radarr
+
+O listener é um processo separado, iniciado por `nas-subs webhooks`. Ele recebe POSTs JSON e **apenas enfileira**; a transcrição continua no worker. O scan periódico recupera importações que não chegaram pelo webhook.
+
+O contrato implementado é Connect → Webhook. Não há script oficial para Connect → Custom Script.
+
+Essa integração possui testes unitários, mas ainda não foi validada contra instâncias reais. Consulte o [contrato completo](docs/roadmap/004-sonarr-radarr-webhooks.md).
+
+#### Iniciar o listener
+
+Defina `NAS_SUBS_WEBHOOK_TOKEN` no `.env`. A variável de ambiente tem precedência sobre `webhooks.token` no YAML. O listener recusa iniciar sem token.
 
 ```bash
 docker compose -f compose.yaml -f compose.offline.yaml -f compose.webhooks.yaml up -d
 ```
 
-Dentro do contêiner o bind é `0.0.0.0:8788` para o publish do Compose
-funcionar. No host a publicação permanece `127.0.0.1:8788:8788`. Não
-abra essa porta na internet.
+A porta no host é `127.0.0.1:8788`. O bind interno do container é `0.0.0.0:8788` para permitir a publicação pelo Compose. Não exponha o listener à internet.
 
-Local no Mac:
+Na execução local:
 
 ```bash
 NAS_SUBS_WEBHOOK_TOKEN=um-segredo-longo \
   uv run nas-subs webhooks --config /caminho/absoluto/config/config.yaml
 ```
 
-Sem `--host`, o YAML padrão escuta `127.0.0.1:8788`. Health sem
-autenticação: `GET /health`.
+O padrão local é `127.0.0.1:8788`. O endpoint `GET /health` não exige autenticação. O worker precisa estar em execução separadamente.
 
-O worker precisa estar rodando em paralelo (`daemon` / serviço
-`subtitles`). O serviço `webhooks` monta a mídia **somente leitura** e o
-`state_dir`; ele não processa jobs.
+#### Configurar o Connect
 
-### Configurar o Connect no Sonarr / Radarr
+Em Settings → Connect → Webhook, configure POST e a URL correspondente:
 
-1. Settings → Connect → `+` → **Webhook**.
-2. URL:
-   - Sonarr: `http://127.0.0.1:8788/hooks/sonarr`
-   - Radarr: `http://127.0.0.1:8788/hooks/radarr`
-   - genérico: `http://127.0.0.1:8788/hooks`
-3. Método: POST. Eventos de importação/upgrade (`On Import` / `On
-   Upgrade` / `Download`). Outros eventos são ignorados (HTTP 200,
-   `action: ignored`) e não enfileiram nada.
-4. Autenticação — um destes, com o mesmo segredo:
-   - `Authorization: Bearer <token>`
-   - cabeçalho `X-Api-Key`
-   - cabeçalho `X-Webhook-Token`
-   - query `?token=` (funciona, mas cabeçalho é preferível)
-5. Evento `Test` é reconhecido (`action: acknowledged`) e não cria job.
-6. Sem token, ou token errado: HTTP 401, nada entra na fila. Payload
-   malformado ou caminho fora de `media_roots`: falha fechada, nada
-   enfileirado.
+| Origem | Endpoint |
+|---|---|
+| Sonarr | `http://127.0.0.1:8788/hooks/sonarr` |
+| Radarr | `http://127.0.0.1:8788/hooks/radarr` |
+| Genérico | `http://127.0.0.1:8788/hooks` |
 
-Se o Sonarr/Radarr roda **noutro contêiner**, `127.0.0.1` lá dentro não é
-este host. Use uma rede Docker compartilhada e o nome de serviço
-`webhooks`, ou outro endereço LAN documentado. Não publique a porta além
-do loopback sem entender a exposição.
+Utilize o mesmo segredo por `Authorization: Bearer <token>`, `X-Api-Key` ou `X-Webhook-Token`. A query `?token=` também é aceita; prefira cabeçalhos.
 
-### Caminhos: host versus contêiner
+- Importação/upgrade: processado conforme o payload.
+- Evento `Test`: reconhecido, sem criar job.
+- Outros eventos: ignorados, com HTTP 200 e `action: ignored`.
+- Token ausente ou incorreto: HTTP 401, sem enfileiramento.
+- Payload inválido ou caminho fora dos roots: rejeitado, sem enfileiramento.
 
-O JSON do *arr traz o caminho do arquivo importado
-(`episodeFile.path`, `movieFile.path`, ou as listas `episodeFiles` /
-`movieFiles`). Esse caminho precisa, depois do mapeamento, cair dentro de
-um `media_roots` **como o processo de webhooks vê o disco**.
+Se Sonarr/Radarr estiver em outro container, `127.0.0.1` aponta para esse container. Configure uma rede compartilhada com o serviço `webhooks` ou um endereço acessível adequado à implantação.
 
-Se o *arr reporta caminhos de host diferentes do mount do contêiner,
-configure `webhooks.path_maps` (prefixo; o resultado ainda tem de ficar
-dentro de `media_roots`):
+#### Mapear caminhos
+
+O caminho recebido em `episodeFile.path`, `movieFile.path` ou suas listas deve corresponder à visão de disco do listener. Configure prefixos quando os caminhos forem diferentes:
 
 ```yaml
 webhooks:
@@ -320,113 +369,37 @@ webhooks:
       container_prefix: /media
 ```
 
-Barras invertidas estilo Windows são normalizadas para `/`. Mapas
-Windows → POSIX dependem de `path_maps` explícitos; o código não inventa
-drive letters.
+O caminho resultante deve permanecer dentro de `media_roots`. Barras Windows são normalizadas; conversões Windows → POSIX exigem mapas explícitos.
 
-Importações já concluídas pelo *arr **não** passam de novo pela janela de
-estabilidade (`require_stability=False`). O scan periódico, esse sim,
-exige tamanho e `mtime` estáveis em duas observações.
+Importações concluídas recebidas por webhook não repetem a janela de estabilidade. O scanner continua verificando tamanho e `mtime` em duas observações.
 
-Um segundo webhook para o mesmo fingerprint devolve o job existente
-(`already_queued`). Cada idioma em `languages.targets` é um job
-independente.
+Webhooks repetidos para o mesmo fingerprint retornam o job existente (`already_queued`). Alterar bind, porta, token ou mapas não invalida transcrições.
 
-`bind`, `port`, `token` e `path_maps` ficam fora de `pipeline_config_hash`:
-mudar o listener não invalida transcrições.
+## Uso com Bazarr e Jellyfin
 
-Não é preciso — e este projeto **não usa** — chave de API do Jellyfin nem
-do Bazarr.
+Defina um produtor de legendas por título. O Bazarr pode indexar o SRT gerado e posteriormente substituí-lo; ajuste os perfis ou upgrades dos títulos após o piloto, conforme sua versão.
 
-## Conviver com Bazarr e Jellyfin
+No Jellyfin, confirme a existência e a validade do SRT antes de atualizar a biblioteca manualmente, se necessário.
 
-**Um produtor por título.** O Bazarr pode indexar o `.pt-BR.srt` que esta
-ferramenta cria e depois substituí-lo por uma legenda baixada. Depois do
-piloto, tire o perfil do Bazarr dos títulos daqui, ou desative upgrades
-nessa abrangência, nas opções da **sua** versão do Bazarr. Este projeto
-não altera o Bazarr e não precisa de API key.
+O projeto não altera essas aplicações e não utiliza suas chaves de API.
 
-No Jellyfin, confirme primeiro que o SRT existe e parseia (ler o arquivo,
-`ffprobe`). Só se ainda não aparecer, atualize a biblioteca pelo
-dashboard. Também sem API key.
+## Proteção da biblioteca
 
-## Como a biblioteca é protegida
-
-- Bind de mídia **somente leitura** por padrão. Sidecar exige
-  `publish_mode: sidecar` **e** `compose.sidecar.yaml` (no Docker).
-- Vídeos nunca são remuxados, recodificados, renomeados nem apagados.
-  Metadados do container de vídeo não são escritos.
-- Arquivo já existente no nome-alvo **nunca** é sobrescrito
-  (`output_conflict`).
-- Vídeo que já tem legenda portuguesa completa (externa ou embutida) é
-  ignorado. `forced` não conta como completa.
-- Fora do webhook de importação, a fila só aceita arquivo estável em
-  duas observações (tamanho + mtime), para não processar cópia em
-  andamento.
-- `cleanup` só apaga dentro de `work_dir` e só com job ID validado. Nunca
-  por glob, nunca na mídia.
-
-## Comandos
-
-Não existe `nas-subs dub`. Os comandos que o CLI realmente expõe:
-
-```text
-nas-subs doctor              ambiente, caminhos, recursos, publish atômico, modelos
-nas-subs models install      baixa Whisper e o par Argos direto (única etapa com rede)
-nas-subs models verify       confirma que os modelos carregam offline
-nas-subs inspect PATH        streams, duração e a faixa de áudio escolhida
-nas-subs process PATH        um arquivo na frente da fila (mesmo lock e mesmas regras)
-nas-subs enqueue PATH        coloca um arquivo na fila (com checagem de estabilidade)
-nas-subs scan                uma passada nos roots; --dry-run não enfileira
-nas-subs worker              daemon: scan periódico + processamento serial
-nas-subs daemon              alias de worker; entrypoint do serviço Compose
-nas-subs jobs list|show|retry|cancel|approve
-nas-subs publish JOB_ID      publica job aprovado sem retranscrever
-nas-subs benchmark PATH      vazão e memória numa janela curta (desta máquina, não do NAS)
-nas-subs health              heartbeat + banco; healthcheck do Docker
-nas-subs cleanup             intermediários em work_dir; dry-run até --apply
-nas-subs backup              backup consistente de config, manifesto e SQLite
-nas-subs dashboard           UI opcional; não processa jobs nem toma o lock
-nas-subs webhooks            listener Sonarr/Radarr; não processa jobs nem toma o lock
-```
-
-Todo comando aceita `--json` e nenhum pergunta nada. Códigos de saída
-(`ExitCode`): `0` sucesso, `2` argumento/config inválidos, `3` preflight,
-`4` falha de processamento, `5` revisão ou conflito, `6` lock do worker
-já preso.
-
-`--preview-seconds` em `process` escreve em staging com `.preview` no
-nome. `scan` no CLI já é uma passada (`--once` é aceito; o loop periódico
-é o `daemon`).
-
-## Configuração
-
-Copie `config/config.example.yaml`; cada opção está documentada lá.
-Caminhos absolutos. Padrões relevantes:
-
-- `publish_mode: staging`
-- Whisper `small`, `device: cpu`, `compute_type: int8`
-- chunks de 300 s com 2 s de overlap
-- legendas de até 2 linhas × 42 caracteres
-- `languages.source: auto`, `languages.targets: [pt-BR]`
-- `translation.allowed_pairs: [en:pt]` (família pública; Argos `pb` é
-  interno)
-- `scan_interval_seconds` / `stability_window_seconds` /
-  `minimum_file_age_seconds`: 600
-- `worker.concurrency: 1`
-- `webhooks.bind: 127.0.0.1`, `webhooks.port: 8788`, `path_maps: []`
-
-Vários destinos (`pt-BR`, `en`, `es`, …) geram um job por idioma e um
-arquivo `.<tag>.srt`. `models install` ainda só instala o par do destino
-primário.
+- Mídia somente leitura por padrão.
+- Nenhuma alteração de vídeo ou metadados do container.
+- Nenhuma sobrescrita de arquivos existentes.
+- Vídeos com legenda portuguesa completa, externa ou embutida, são ignorados; legenda `forced` não conta como completa.
+- Arquivos em cópia não são processados pelo scanner: tamanho e `mtime` precisam permanecer estáveis em duas observações.
+- `cleanup` atua somente em `work_dir`, com job ID validado, sem exclusão por glob ou na biblioteca.
 
 ## Documentação
 
-- [docs/architecture.md](docs/architecture.md) — como as peças se encaixam
-- [docs/runbook.md](docs/runbook.md) — instalação, piloto e recuperação
-- [docs/benchmark.md](docs/benchmark.md) — o que foi medido e o que está bloqueado
-- [docs/decisions.md](docs/decisions.md) — por que as coisas são assim
-- [docs/roadmap/004-sonarr-radarr-webhooks.md](docs/roadmap/004-sonarr-radarr-webhooks.md)
-  — contrato 004 (webhooks)
-- [AGENTS.md](AGENTS.md) — regras e posse de módulos para quem contribui
-- [ROADMAP.md](ROADMAP.md) — 000–005 feitos; 006 dublagem planejada, não implementada
+| Documento | Conteúdo |
+|---|---|
+| [Arquitetura](docs/architecture.md) | Componentes e fluxo de processamento |
+| [Runbook](docs/runbook.md) | Instalação, piloto e recuperação |
+| [Benchmark](docs/benchmark.md) | Medições realizadas e validações pendentes |
+| [Decisões técnicas](docs/decisions.md) | Justificativas de arquitetura |
+| [Webhooks](docs/roadmap/004-sonarr-radarr-webhooks.md) | Contrato de integração Sonarr/Radarr |
+| [Guia para contribuidores](AGENTS.md) | Regras e responsabilidade dos módulos |
+| [Roadmap](ROADMAP.md) | Itens concluídos e evolução planejada |
