@@ -212,7 +212,7 @@ def _doctor_checks(config: AppConfig) -> list[DoctorCheck]:
         checks.append(DoctorCheck("dashboard", "ok", detail))
 
     try:
-        bind = webhooks.resolve_webhook_bind(config)
+        webhook_bind = webhooks.resolve_webhook_bind(config)
     except NasSubtitlesError:
         checks.append(
             DoctorCheck(
@@ -222,7 +222,7 @@ def _doctor_checks(config: AppConfig) -> list[DoctorCheck]:
             )
         )
     else:
-        if bind.public_bind:
+        if webhook_bind.public_bind:
             checks.append(
                 DoctorCheck(
                     "webhooks",
@@ -232,7 +232,13 @@ def _doctor_checks(config: AppConfig) -> list[DoctorCheck]:
                 )
             )
         else:
-            checks.append(DoctorCheck("webhooks", "ok", f"{bind.host}:{bind.port}, token configured"))
+            checks.append(
+                DoctorCheck(
+                    "webhooks",
+                    "ok",
+                    f"{webhook_bind.host}:{webhook_bind.port}, token configured",
+                )
+            )
 
     try:
         verified = models.verify_models(config, offline=True)

@@ -145,7 +145,8 @@ def create_server(
 ) -> ThreadingHTTPServer:
     """Build a webhook server. Does not acquire the worker lock."""
     bind = resolve_webhook_bind(config, host=host, port=port, token=token)
-    return ThreadingHTTPServer((bind.host, bind.port), make_handler(config, repository, bind, probe))
+    handler = make_handler(config, repository, bind, probe)
+    return ThreadingHTTPServer((bind.host, bind.port), handler)
 
 
 def serve_webhooks(
@@ -540,14 +541,22 @@ def _fold_event_type(event_type: str) -> str:
     return event_type.strip().lower().replace("_", "").replace("-", "")
 
 
-def _provided_token(headers: Mapping[str, str], query: dict[str, list[str]]) -> str | None:
-    authorization = headers.get("Authorization", "")
+def _header_value(headers: object, name: str) -> str:
+    getter = getattr(headers, "get", None)
+    if getter is None:
+        return ""
+    value = getter(name)
+    return value.strip() if isinstance(value, str) else ""
+
+
+def _provided_token(headers: object, query: dict[str, list[str]]) -> str | None:
+    authorization = _header_value(headers, "Authorization")
     if authorization.startswith("Bearer "):
         return authorization[len("Bearer ") :].strip() or None
     for name in _TOKEN_HEADERS:
-        value = headers.get(name)
-        if value is not None and value.strip():
-            return value.strip()
+        value = _header_value(headers, name)
+        if value:
+            return value
     query_values = query.get("token") or []
     if query_values and query_values[0].strip():
         return query_values[0].strip()

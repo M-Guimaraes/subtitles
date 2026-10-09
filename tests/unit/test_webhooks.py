@@ -48,7 +48,8 @@ def _fast_config(config: AppConfig) -> AppConfig:
 
 
 def _with_token(config: AppConfig, token: str = _TOKEN) -> AppConfig:
-    return config.model_copy(update={"webhooks": config.webhooks.model_copy(update={"token": token})})
+    webhooks = config.webhooks.model_copy(update={"token": token})
+    return config.model_copy(update={"webhooks": webhooks})
 
 
 def _with_maps(config: AppConfig, host_prefix: Path, container_prefix: Path) -> AppConfig:
@@ -190,9 +191,7 @@ def test_duplicate_webhook_is_idempotent(config: AppConfig, media_root: Path) ->
     assert len(jobs) == 1
 
 
-def test_scan_still_finds_files_the_webhook_missed(
-    config: AppConfig, media_root: Path
-) -> None:
+def test_scan_still_finds_files_the_webhook_missed(config: AppConfig, media_root: Path) -> None:
     config = _fast_config(config)
     hooked = media_root / "hooked.mkv"
     missed = media_root / "missed.mkv"
@@ -200,9 +199,9 @@ def test_scan_still_finds_files_the_webhook_missed(
     missed.write_bytes(b"m" * 32)
     repo = open_repository(config)
     now = datetime.now(tz=UTC)
-    ingest_webhook(config, repo, _sonarr_payload(hooked), probe=_FakeProbe())
     _stabilize(config, repo, hooked, now=now)
     _stabilize(config, repo, missed, now=now)
+    ingest_webhook(config, repo, _sonarr_payload(hooked), probe=_FakeProbe())
     summary = scan(config, repo, now=now, probe=_FakeProbe())
     jobs = repo.list_jobs()
     repo.close()
@@ -296,9 +295,7 @@ def test_http_valid_sonarr_event_enqueues(config: AppConfig, media_root: Path) -
     video = media_root / "http-sonarr.mkv"
     video.write_bytes(b"s" * 32)
     repo = open_repository(config)
-    server = create_server(
-        _with_token(config), repo, host="127.0.0.1", port=0, probe=_FakeProbe()
-    )
+    server = create_server(_with_token(config), repo, host="127.0.0.1", port=0, probe=_FakeProbe())
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     host, port = server.server_address[:2]
@@ -326,9 +323,7 @@ def test_http_valid_radarr_event_enqueues(config: AppConfig, media_root: Path) -
     video = media_root / "http-radarr.mkv"
     video.write_bytes(b"r" * 32)
     repo = open_repository(config)
-    server = create_server(
-        _with_token(config), repo, host="127.0.0.1", port=0, probe=_FakeProbe()
-    )
+    server = create_server(_with_token(config), repo, host="127.0.0.1", port=0, probe=_FakeProbe())
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     host, port = server.server_address[:2]
@@ -354,9 +349,7 @@ def test_http_rejects_bad_token(config: AppConfig, media_root: Path) -> None:
     video = media_root / "denied.mkv"
     video.write_bytes(b"no")
     repo = open_repository(config)
-    server = create_server(
-        _with_token(config), repo, host="127.0.0.1", port=0, probe=_FakeProbe()
-    )
+    server = create_server(_with_token(config), repo, host="127.0.0.1", port=0, probe=_FakeProbe())
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     host, port = server.server_address[:2]
@@ -382,9 +375,7 @@ def test_http_rejects_bad_token(config: AppConfig, media_root: Path) -> None:
 
 def test_http_rejects_malformed_payload(config: AppConfig) -> None:
     repo = open_repository(config)
-    server = create_server(
-        _with_token(config), repo, host="127.0.0.1", port=0, probe=_FakeProbe()
-    )
+    server = create_server(_with_token(config), repo, host="127.0.0.1", port=0, probe=_FakeProbe())
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     host, port = server.server_address[:2]
@@ -412,9 +403,7 @@ def test_http_rejects_path_outside_roots(config: AppConfig, tmp_path: Path) -> N
     outsider = tmp_path / "escape.mkv"
     outsider.write_bytes(b"x")
     repo = open_repository(config)
-    server = create_server(
-        _with_token(config), repo, host="127.0.0.1", port=0, probe=_FakeProbe()
-    )
+    server = create_server(_with_token(config), repo, host="127.0.0.1", port=0, probe=_FakeProbe())
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     host, port = server.server_address[:2]
@@ -440,9 +429,7 @@ def test_http_rejects_path_outside_roots(config: AppConfig, tmp_path: Path) -> N
 
 def test_http_test_event_does_not_enqueue(config: AppConfig) -> None:
     repo = open_repository(config)
-    server = create_server(
-        _with_token(config), repo, host="127.0.0.1", port=0, probe=_FakeProbe()
-    )
+    server = create_server(_with_token(config), repo, host="127.0.0.1", port=0, probe=_FakeProbe())
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     host, port = server.server_address[:2]
