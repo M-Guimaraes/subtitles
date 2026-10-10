@@ -200,6 +200,8 @@ def make_handler(service: DashboardService, bind: DashboardBind) -> type[BaseHTT
                 )
             if method == "GET" and path.startswith("/api/jobs/"):
                 return service.get_job(_job_id_from_path(path, suffix=""))
+            if method == "POST" and path == "/api/jobs/delete":
+                return service.delete_jobs(self._json_body().get("ids"))
             if method == "POST" and path.endswith("/retry"):
                 return service.retry_job(_job_id_from_path(path, suffix="/retry"))
             if method == "POST" and path.endswith("/cancel"):

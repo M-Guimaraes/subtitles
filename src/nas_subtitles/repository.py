@@ -21,6 +21,7 @@ from typing import IO
 from .config import AppConfig
 from .domain import (
     DB_SCHEMA_VERSION,
+    TERMINAL_JOB_STATES,
     ArtifactRecord,
     DubSegment,
     DubSegmentReviewState,
@@ -518,6 +519,31 @@ class SqliteJobRepository:
                 detail={"job_id": job_id},
             )
         return job
+
+    def delete_job(self, job_id: str) -> None:
+        """Forget a finished job and every row that belongs to it.
+
+        Only terminal jobs can go; a queued or running one must be cancelled
+        first. Shared state (translation cache, scan observations) stays.
+        """
+        job = self.require_job(job_id)
+        if job.state not in TERMINAL_JOB_STATES:
+            raise NasSubtitlesError(
+                f"job {job_id} is {job.state}; only a finished job can be deleted",
+                code=ErrorCode.INVALID_STATE_TRANSITION,
+                detail={"job_id": job_id, "state": str(job.state)},
+            )
+        with self._transaction(immediate=True) as connection:
+            for table in (
+                "artifacts",
+                "events",
+                "metrics",
+                "dub_segments",
+                "voice_assignments",
+                "synthesis_artifacts",
+            ):
+                connection.execute(f"DELETE FROM {table} WHERE job_id = ?", (job_id,))
+            connection.execute("DELETE FROM jobs WHERE id = ?", (job_id,))
 
     # -- artifacts, events and metrics ------------------------------------- #
 

@@ -20,6 +20,7 @@ from nas_subtitles.domain import (
     ErrorCode,
     EventLevel,
     JobEvent,
+    JobMetrics,
     JobState,
     MediaFingerprint,
     NasSubtitlesError,
@@ -497,6 +498,102 @@ def test_http_media_roots_is_read_only_on_a_public_bind_without_token(
             "127.0.0.1", port, "POST", "/api/settings/media-roots", body={"paths": [str(tmp_path)]}
         )
         assert denied.status == 401
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2)
+        repo.close()
+
+
+def _finished_job(repo: object, name: str, state: JobState = JobState.COMPLETED) -> str:
+    job = repo.enqueue(fingerprint=_fingerprint(name), pipeline_config_hash="h")  # type: ignore[attr-defined]
+    repo.claim_next_job(owner="w", lease_seconds=60)  # type: ignore[attr-defined]
+    if state is JobState.COMPLETED:
+        repo.transition(job_id=job.id, state=JobState.COMPLETED)  # type: ignore[attr-defined]
+    else:
+        repo.transition(job_id=job.id, state=state, error_code=ErrorCode.IO_ERROR)  # type: ignore[attr-defined]
+    return job.id
+
+
+def test_delete_jobs_removes_rows_and_only_that_jobs_scratch_files(config: AppConfig) -> None:
+    service, repo = _service(config)
+    doomed = _finished_job(repo, "a.mkv")
+    kept = _finished_job(repo, "b.mkv", JobState.FAILED)
+    repo.record_metrics(JobMetrics(job_id=doomed, media_seconds=1.0))
+    _write_manifest(config, doomed)
+    for job_id in (doomed, kept):
+        (config.work_dir / job_id).mkdir(parents=True)
+        (config.work_dir / job_id / "chunk.wav").write_bytes(b"x")
+    published = config.output_dir / "staged.pt-BR.srt"
+    published.write_text("1\n", encoding="utf-8")
+
+    result = service.delete_jobs([doomed])
+    remaining = {job.id for job in repo.list_jobs(limit=10)}
+    repo.close()
+
+    assert result == {"ok": True, "deleted": [doomed], "skipped": []}
+    assert remaining == {kept}
+    assert not (config.work_dir / doomed).exists()
+    assert not (config.manifests_dir / f"{doomed}.json").exists()
+    assert (config.work_dir / kept).is_dir()
+    assert published.is_file()
+
+
+def test_delete_jobs_skips_unfinished_and_unknown_ids(config: AppConfig) -> None:
+    service, repo = _service(config)
+    waiting = repo.enqueue(fingerprint=_fingerprint("c.mkv"), pipeline_config_hash="h").id
+    result = service.delete_jobs([waiting, "not-a-job"])
+    still_there = repo.get_job(waiting)
+    repo.close()
+
+    assert result["deleted"] == []
+    assert result["skipped"] == [
+        {"id": waiting, "reason": "not_finished"},
+        {"id": "not-a-job", "reason": "not_found"},
+    ]
+    assert still_there is not None
+
+
+def test_repository_refuses_to_delete_a_running_job(config: AppConfig) -> None:
+    repo = open_repository(config)
+    job = repo.enqueue(fingerprint=_fingerprint("d.mkv"), pipeline_config_hash="h")
+    repo.claim_next_job(owner="w", lease_seconds=60)
+    with pytest.raises(NasSubtitlesError) as raised:
+        repo.delete_job(job.id)
+    repo.close()
+    assert raised.value.code is ErrorCode.INVALID_STATE_TRANSITION
+
+
+def test_finished_jobs_offer_delete_and_unfinished_do_not(config: AppConfig) -> None:
+    from nas_subtitles.api import available_actions
+
+    repo = open_repository(config)
+    done = repo.require_job(_finished_job(repo, "e.mkv"))
+    queued = repo.enqueue(fingerprint=_fingerprint("f.mkv"), pipeline_config_hash="h")
+    repo.close()
+    assert "delete" in available_actions(done)
+    assert "delete" not in available_actions(queued)
+
+
+@pytest.mark.parametrize("bad", [None, [], "x", list(range(201))])
+def test_delete_jobs_validates_the_request(config: AppConfig, bad: object) -> None:
+    service, repo = _service(config)
+    with pytest.raises(ValueError):
+        service.delete_jobs(bad)
+    repo.close()
+
+
+def test_http_delete_jobs(config: AppConfig) -> None:
+    repo = open_repository(config)
+    job_id = _finished_job(repo, "g.mkv")
+    server = create_server(config, repo, host="127.0.0.1", port=0)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    host, port = server.server_address[:2]
+    try:
+        result = _request_json(host, port, "POST", "/api/jobs/delete", body={"ids": [job_id]})
+        assert result["deleted"] == [job_id]
+        assert _request_json(host, port, "GET", "/api/jobs")["pagination"]["total"] == 0
     finally:
         server.shutdown()
         server.server_close()

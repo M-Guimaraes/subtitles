@@ -9,6 +9,8 @@ dashboard cannot stop background processing.
 from __future__ import annotations
 
 import os
+import re
+import shutil
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -38,7 +40,7 @@ from .domain import (
     stages_for,
 )
 from .health import HealthReport, check_health
-from .output import read_manifest_payload
+from .output import manifest_path_for, read_manifest_payload
 from .states import can_transition
 
 __all__ = [
@@ -82,6 +84,8 @@ class OperatorRepository(JobRepository, Protocol):
     """
 
     def require_job(self, job_id: str) -> JobRecord: ...
+
+    def delete_job(self, job_id: str) -> None: ...
 
     def list_jobs(
         self,
@@ -315,6 +319,32 @@ class DashboardService:
         updated = self.repository.transition(job_id=job_id, state=JobState.QUEUED)
         return {"ok": True, "job": self._job_payload(updated), "action": "reprocess"}
 
+    def delete_jobs(self, ids: object) -> dict[str, object]:
+        """Remove finished jobs from the queue database and their scratch files.
+
+        Never touches the library, a published ``.srt`` or a staged output; only
+        the job's rows, its manifest and its own directory inside ``work_dir``.
+        A running or queued job is skipped: cancel it first.
+        """
+        if not isinstance(ids, list) or not ids or len(ids) > _DELETE_LIMIT:
+            raise ValueError(f"send between 1 and {_DELETE_LIMIT} job ids")
+        deleted: list[str] = []
+        skipped: list[dict[str, str]] = []
+        for raw in ids:
+            job_id = raw if isinstance(raw, str) else ""
+            try:
+                job = self.repository.require_job(job_id)
+            except NasSubtitlesError:
+                skipped.append({"id": str(raw), "reason": "not_found"})
+                continue
+            if job.state not in HISTORY_STATES:
+                skipped.append({"id": job_id, "reason": "not_finished"})
+                continue
+            self.repository.delete_job(job_id)
+            _remove_job_files(self.config, job_id)
+            deleted.append(job_id)
+        return {"ok": True, "deleted": deleted, "skipped": skipped}
+
     def rescan(self) -> dict[str, object]:
         """One library walk. Does not take the worker lock."""
         summary = scan(self.config, self.repository)
@@ -509,6 +539,22 @@ def job_summary(
     }
 
 
+_DELETE_LIMIT = 200
+_JOB_DIR_RE = re.compile(
+    r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$", re.IGNORECASE
+)
+
+
+def _remove_job_files(config: AppConfig, job_id: str) -> None:
+    """Delete one job's manifest and its own ``work_dir/<id>``; never by glob."""
+    manifest_path_for(config, job_id).unlink(missing_ok=True)
+    if not _JOB_DIR_RE.match(job_id):
+        return
+    directory = config.work_dir / job_id
+    if directory.is_dir() and not directory.is_symlink():
+        shutil.rmtree(directory, ignore_errors=True)
+
+
 def available_actions(job: JobRecord) -> list[str]:
     """Actions the operator may take from the current state."""
     actions: list[str] = []
@@ -518,6 +564,8 @@ def available_actions(job: JobRecord) -> list[str]:
         actions.append("cancel")
     if job.state in _REPROCESS_STATES and can_transition(job.state, JobState.QUEUED):
         actions.append("reprocess")
+    if job.state in HISTORY_STATES:
+        actions.append("delete")
     return actions
 
 

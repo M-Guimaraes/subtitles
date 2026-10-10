@@ -13,7 +13,7 @@ HTML/CSS/JS que fica em [`src/nas_subtitles/static/`](../src/nas_subtitles/stati
   `worker.lock` e nunca roda inferência (Whisper/Argos). Parar o dashboard não
   para o processamento da fila.
 - Ele é **somente leitura sobre a fila**, com três ações pontuais possíveis
-  por job: `retry`, `cancel`, `reprocess`. Ele **nunca escreve** em
+  por job: `retry`, `cancel`, `reprocess` e `delete` (só jobs finalizados). Ele **nunca escreve** em
   `config.yaml` — a tela "Settings" espelha a config carregada, e a única
   coisa editável ali são as **bibliotecas de mídia** (ver seção 8).
 - Todo acesso a dados passa por uma camada de serviço,
@@ -198,6 +198,7 @@ Toda a UI fala com estas rotas (todas sob `/api/`, todas JSON,
 | POST | `/api/jobs/<id>/retry` | `retry_job()` | botão "Retry" |
 | POST | `/api/jobs/<id>/cancel` | `cancel_job()` | botão "Cancel" |
 | POST | `/api/jobs/<id>/reprocess` | `reprocess_job()` | botão "Reprocess" |
+| POST | `/api/jobs/delete` | `delete_jobs()` | excluir (linha, seleção em lote ou detalhe) |
 | POST | `/api/scan` | `rescan()` | botão "Rescan library" |
 | GET | `/api/settings` | `settings()` | tela Settings |
 | POST | `/api/settings/media-roots` | `update_media_roots()` | editar bibliotecas |
@@ -271,3 +272,15 @@ uma ação.
   reaproveitados se ainda baterem fingerprint/hash de configuração.
 - Sem HTTPS nativo; é pensado para LAN confiável atrás do bind loopback (ou
   de um proxy reverso, se exposto).
+
+## Excluir jobs
+
+`POST /api/jobs/delete` com `{"ids": [...]}` (até 200). Só jobs finalizados
+(`completed`, `skipped`, `failed`, `cancelled`); um job em fila ou rodando vai
+para `skipped` na resposta (`not_finished`) e deve ser cancelado antes. Apaga as
+linhas do banco (`jobs`, `artifacts`, `events`, `metrics`, `dub_segments`,
+`voice_assignments`, `synthesis_artifacts`), o manifesto em `state_dir/manifests/`
+e a pasta `work_dir/<job_id>` daquele job (id validado, nunca por glob). **Não**
+apaga a biblioteca, uma legenda já publicada nem saídas em `output_dir`. O cache
+de tradução é compartilhado e fica. Como o job some, uma nova varredura pode
+recriá-lo se o arquivo ainda não tiver legenda.

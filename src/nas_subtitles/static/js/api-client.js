@@ -74,6 +74,12 @@ export const api = {
   retry: (id) => request(`/api/jobs/${encodeURIComponent(id)}/retry`, { method: "POST" }),
   cancel: (id) => request(`/api/jobs/${encodeURIComponent(id)}/cancel`, { method: "POST" }),
   reprocess: (id) => request(`/api/jobs/${encodeURIComponent(id)}/reprocess`, { method: "POST" }),
+  deleteJobs: (ids) =>
+    request("/api/jobs/delete", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ ids }),
+    }),
   scan: () => request("/api/scan", { method: "POST" }),
   settings: (options) => request("/api/settings", options),
   updateMediaRoots: (body) =>

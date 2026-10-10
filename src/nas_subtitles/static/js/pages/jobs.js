@@ -8,6 +8,10 @@ import {
   languageName,
   languagePair,
 } from "../utils/format.js";
+import { confirmDialog, showToast } from "../utils/ui.js";
+
+const DELETABLE_STATES = new Set(["completed", "skipped", "failed", "cancelled"]);
+const selected = new Set();
 
 const QUICK_FILTERS = [
   { key: "all", label: "Todos", state: null },
@@ -54,6 +58,11 @@ function row(job) {
     : "";
   return `
     <tr data-id="${escapeHtml(job.id)}">
+      <td class="select-cell">${
+        DELETABLE_STATES.has(job.state)
+          ? `<input type="checkbox" data-select="${escapeHtml(job.id)}" aria-label="Selecionar ${escapeHtml(job.title)}" ${selected.has(job.id) ? "checked" : ""} />`
+          : ""
+      }</td>
       <td>
         <div class="file-title">${escapeHtml(job.title)}</div>
         <div class="muted small">${escapeHtml(folder)}</div>
@@ -63,7 +72,49 @@ function row(job) {
       <td><span class="badge tone-${status.tone}">${escapeHtml(status.label)}</span></td>
       <td>${progressCell(job)}</td>
       <td class="muted small">${escapeHtml(formatRelativeTime(job.updated_at))}</td>
+      <td class="row-actions">${
+        DELETABLE_STATES.has(job.state)
+          ? `<button type="button" class="btn secondary icon-btn" data-delete="${escapeHtml(job.id)}" title="Excluir job" aria-label="Excluir job">Excluir</button>`
+          : ""
+      }</td>
     </tr>`;
+}
+
+function updateBulkBar(root) {
+  const bar = root.querySelector("#bulk-bar");
+  if (!bar) return;
+  bar.classList.toggle("hidden", selected.size === 0);
+  bar.querySelector("[data-selected-count]").textContent = String(selected.size);
+  const visible = [...root.querySelectorAll("input[data-select]")];
+  const all = root.querySelector("#select-all");
+  if (all) {
+    all.checked = visible.length > 0 && visible.every((box) => box.checked);
+    all.disabled = visible.length === 0;
+  }
+}
+
+async function deleteJobs(root, params, ids) {
+  const many = ids.length > 1;
+  const confirmed = await confirmDialog({
+    title: many ? `Excluir ${ids.length} jobs` : "Excluir job",
+    body: "Os jobs saem da lista, com histórico e arquivos temporários. Legendas ou dublagens já geradas não são apagadas. Se o arquivo ainda não tiver legenda, uma nova varredura pode criar o job de novo.",
+    confirmLabel: "Excluir",
+    danger: true,
+  });
+  if (!confirmed) return;
+  try {
+    const result = await api.deleteJobs(ids);
+    result.deleted.forEach((id) => selected.delete(id));
+    showToast(
+      result.skipped.length
+        ? `${result.deleted.length} excluído(s); ${result.skipped.length} ignorado(s) (ainda em andamento).`
+        : `${result.deleted.length} job(s) excluído(s).`,
+      result.skipped.length ? "warning" : "success",
+    );
+  } catch (error) {
+    showToast(error.message || "Falha ao excluir.", "error");
+  }
+  await Promise.all([loadTable(root, params), loadCounts(root)]);
 }
 
 function paginationControls(pagination) {
@@ -124,12 +175,24 @@ async function loadTable(root, params) {
   const payload = await api.jobs(stateQuery(params));
   tbody.innerHTML = payload.jobs.length
     ? payload.jobs.map(row).join("")
-    : `<tr><td colspan="6" class="empty-state">Nenhum job encontrado para esse filtro.</td></tr>`;
+    : `<tr><td colspan="8" class="empty-state">Nenhum job encontrado para esse filtro.</td></tr>`;
   tbody.querySelectorAll("tr[data-id]").forEach((node) => {
-    node.addEventListener("click", () => {
+    node.addEventListener("click", (event) => {
+      if (event.target.closest("input, button")) return;
       location.hash = `/jobs/${encodeURIComponent(node.dataset.id)}`;
     });
   });
+  tbody.querySelectorAll("input[data-select]").forEach((box) => {
+    box.addEventListener("change", () => {
+      if (box.checked) selected.add(box.dataset.select);
+      else selected.delete(box.dataset.select);
+      updateBulkBar(root);
+    });
+  });
+  tbody.querySelectorAll("button[data-delete]").forEach((button) => {
+    button.addEventListener("click", () => deleteJobs(root, params, [button.dataset.delete]));
+  });
+  updateBulkBar(root);
   const paginationHost = root.querySelector("#pagination-host");
   paginationHost.innerHTML = paginationControls(payload.pagination);
   paginationHost.querySelectorAll("[data-page]").forEach((button) => {
@@ -185,20 +248,27 @@ export async function renderJobs(root, params) {
         </button>`,
       ).join("")}
     </div>
+    <div class="bulk-bar hidden" id="bulk-bar">
+      <span><strong data-selected-count>0</strong> selecionado(s)</span>
+      <button type="button" class="btn danger" id="bulk-delete">Excluir selecionados</button>
+      <button type="button" class="btn secondary" id="bulk-clear">Limpar seleção</button>
+    </div>
     <div class="table-wrap">
       <table>
         <thead>
           <tr>
+            <th class="select-cell"><input type="checkbox" id="select-all" aria-label="Selecionar todos os finalizados desta página" /></th>
             <th>Arquivo</th>
             <th>Tipo</th>
             <th>Idiomas</th>
             <th>Status</th>
             <th>Progresso</th>
             <th>Atualizado</th>
+            <th></th>
           </tr>
         </thead>
         <tbody id="job-rows">
-          <tr><td colspan="6" class="loading">Carregando…</td></tr>
+          <tr><td colspan="8" class="loading">Carregando…</td></tr>
         </tbody>
       </table>
     </div>
@@ -225,6 +295,24 @@ export async function renderJobs(root, params) {
     button.addEventListener("click", () => {
       pushParams({ ...params, state: button.dataset.state || null, offset: 0 });
     });
+  });
+  root.querySelector("#select-all").addEventListener("change", (event) => {
+    root.querySelectorAll("input[data-select]").forEach((box) => {
+      box.checked = event.target.checked;
+      if (box.checked) selected.add(box.dataset.select);
+      else selected.delete(box.dataset.select);
+    });
+    updateBulkBar(root);
+  });
+  root.querySelector("#bulk-delete").addEventListener("click", () => {
+    deleteJobs(root, params, [...selected]);
+  });
+  root.querySelector("#bulk-clear").addEventListener("click", () => {
+    selected.clear();
+    root.querySelectorAll("input[data-select]").forEach((box) => {
+      box.checked = false;
+    });
+    updateBulkBar(root);
   });
   root.querySelector("#refresh-btn").addEventListener("click", () => {
     loadTable(root, params);

@@ -18,9 +18,15 @@ const ACTION_LABELS = {
   retry: "Tentar novamente",
   cancel: "Cancelar processamento",
   reprocess: "Reprocessar",
+  delete: "Excluir",
 };
 
 const ACTION_CONFIRM = {
+  delete: {
+    title: "Excluir job",
+    body: "O job sai da lista, com histórico e arquivos temporários. A legenda ou dublagem já gerada não é apagada. Se o arquivo ainda não tiver legenda, uma nova varredura pode criar o job de novo.",
+    danger: true,
+  },
   cancel: { title: "Cancelar processamento", body: "O job será marcado como cancelado. Essa ação não pode ser desfeita.", danger: true },
   reprocess: {
     title: "Reprocessar",
@@ -182,7 +188,7 @@ async function load(root, jobId) {
   actionsHost.innerHTML = (job.actions || [])
     .map(
       (action) =>
-        `<button type="button" class="btn ${action === "cancel" ? "danger" : "secondary"}" data-action="${action}">${escapeHtml(ACTION_LABELS[action] || action)}</button>`,
+        `<button type="button" class="btn ${action === "cancel" || action === "delete" ? "danger" : "secondary"}" data-action="${action}">${escapeHtml(ACTION_LABELS[action] || action)}</button>`,
     )
     .join("");
   actionsHost.querySelectorAll("button[data-action]").forEach((button) => {
@@ -202,6 +208,12 @@ async function runAction(root, jobId, button) {
     if (action === "retry") await api.retry(jobId);
     else if (action === "cancel") await api.cancel(jobId);
     else if (action === "reprocess") await api.reprocess(jobId);
+    else if (action === "delete") {
+      await api.deleteJobs([jobId]);
+      showToast("Job excluído.", "success");
+      location.hash = "/jobs";
+      return;
+    }
     showToast(`${ACTION_LABELS[action] || action} solicitado.`, "success");
     await load(root, jobId);
   } catch (error) {

@@ -1013,3 +1013,40 @@ tbody tr:hover {
   font-size: 0.8rem;
   color: var(--danger);
 }
+
+/* ------------------------------------------------------------ job deletion */
+
+.select-cell {
+  width: 2rem;
+  text-align: center;
+}
+
+.select-cell input {
+  padding: 0;
+  cursor: pointer;
+}
+
+.row-actions {
+  text-align: right;
+  white-space: nowrap;
+}
+
+.icon-btn {
+  padding: 0.25rem 0.6rem;
+  font-size: 0.75rem;
+}
+
+.bulk-bar {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  margin-bottom: 0.75rem;
+  padding: 0.6rem 0.9rem;
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+}
+
+.bulk-bar.hidden {
+  display: none;
+}
