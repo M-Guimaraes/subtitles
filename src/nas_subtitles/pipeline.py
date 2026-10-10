@@ -8,7 +8,9 @@ before it.
 from __future__ import annotations
 
 import hashlib
+import json
 import logging
+import uuid
 from dataclasses import dataclass, replace
 from pathlib import Path
 from threading import Event
@@ -163,32 +165,37 @@ def run_job(
 ) -> PipelineResult:
     """Run the job from its current stage, honouring cancellation and SIGTERM.
 
-    ``start_stage`` / ``stop_after`` slice the sequence for that job kind.
-    Subtitle jobs still start at probe in this phase; a later start raises
-    ``not_implemented`` rather than pretending checkpoints exist.
+    ``start_stage`` / ``stop_after`` slice the sequence for that job kind. A
+    subtitle job started past ``detect_language`` resumes from the language
+    checkpoint written after that stage; a missing or stale checkpoint is
+    ``checkpoint_invalid`` rather than a silent full rerun.
     """
     job = context.job
     kind = infer_job_kind(job.job_kind)
     try:
-        window = stage_window(stages_for(kind), start_stage=start_stage, stop_after=stop_after)
+        stage_window(stages_for(kind), start_stage=start_stage, stop_after=stop_after)
     except ValueError as exc:
         raise NasSubtitlesError(str(exc), code=ErrorCode.CONFIG_INVALID) from exc
     if kind is JobKind.DUBBING:
         from .dubbing import run_dubbing_job
 
         return run_dubbing_job(context, start_stage=start_stage, stop_after=stop_after)
-    if window[0] is not PipelineStage.PROBE:
-        raise NasSubtitlesError(
-            "subtitle jobs resume from probe; mid-pipeline start_stage is not implemented",
-            code=ErrorCode.NOT_IMPLEMENTED,
-        )
-    return _run_subtitle_job(context, stop_after=stop_after)
+    return _run_subtitle_job(context, start_stage=start_stage, stop_after=stop_after)
 
 
 def _run_subtitle_job(
-    context: StageContext, *, stop_after: PipelineStage | None = None
+    context: StageContext,
+    *,
+    start_stage: PipelineStage | None = None,
+    stop_after: PipelineStage | None = None,
 ) -> PipelineResult:
-    """Subtitle pipeline. Existing target sidecars still skip *subtitle* jobs only."""
+    """Subtitle pipeline. Existing target sidecars still skip *subtitle* jobs only.
+
+    A ``start_stage`` of ``extract`` or later resumes from the checkpoint
+    written once ``detect_language`` picks a confident, supported language;
+    every stage from there on already reuses its own checkpoint or cache
+    (chunk transcripts, the translation cache), so nothing else changes.
+    """
     config = context.config
     repo = context.repository
     job = context.job
@@ -202,123 +209,175 @@ def _run_subtitle_job(
         )
     video = root.path / job.relative_path
     target_language = config.target_language_for_job(job.target_language)
-    job = repo.transition(job_id=job.id, state=JobState.RUNNING, stage=PipelineStage.PROBE)
-    probe_result = context.probe.probe(video)
-    existing = find_existing_subtitles(path=video, probe_result=probe_result)
-    if has_subtitle_for_target(existing, target_language) and job.preview_seconds is None:
-        job = repo.transition(job_id=job.id, state=JobState.SKIPPED)
-        log_event(
-            _LOG,
-            "media skipped",
-            job_id=job.id,
-            reason=f"existing {target_language} subtitle",
-            target_language=target_language,
-        )
-        return PipelineResult(
-            job_id=job.id, state=job.state, last_stage=PipelineStage.PROBE, quality=QualityReport()
-        )
-    stream = select_audio_stream(
-        probe_result,
-        override_index=job.audio_stream_index_override,
-        config=config,
+    language_stage_hash = config.stage_config_hash(
+        PipelineStage.DETECT_LANGUAGE, target_language=target_language
     )
-    duration = probe_result.duration_seconds
-    if job.preview_seconds is not None:
-        offset = job.preview_offset_seconds or 0.0
-        duration = min(duration, offset + job.preview_seconds)
-    fingerprint = compute_fingerprint(root=root, path=video, audio_stream_index=stream.index)
-    if not fingerprint.content_matches(job.fingerprint):
-        raise NasSubtitlesError("media changed before processing", code=ErrorCode.MEDIA_CHANGED)
-    if stop_after is PipelineStage.PROBE:
-        return PipelineResult(
-            job_id=job.id,
-            state=job.state,
-            last_stage=PipelineStage.PROBE,
-            quality=QualityReport(),
-            media_seconds=duration,
-        )
+    live_prefix = start_stage is None or start_stage in (
+        PipelineStage.PROBE,
+        PipelineStage.DETECT_LANGUAGE,
+    )
 
-    job = repo.transition(
-        job_id=job.id, state=JobState.RUNNING, stage=PipelineStage.DETECT_LANGUAGE
-    )
-    override = effective_source_override(config, job_override=job.source_language_override)
-    decision = decide_source_language(
-        config,
-        stream=stream,
-        override=override,
-        transcriber=context.transcriber,
-    )
-    if override is None:
-        samples = _language_sample_chunks(
-            context, video=video, stream_index=stream.index, duration=duration
+    if live_prefix:
+        job = repo.transition(job_id=job.id, state=JobState.RUNNING, stage=PipelineStage.PROBE)
+        probe_result = context.probe.probe(video)
+        existing = find_existing_subtitles(path=video, probe_result=probe_result)
+        if has_subtitle_for_target(existing, target_language) and job.preview_seconds is None:
+            job = repo.transition(job_id=job.id, state=JobState.SKIPPED)
+            log_event(
+                _LOG,
+                "media skipped",
+                job_id=job.id,
+                reason=f"existing {target_language} subtitle",
+                target_language=target_language,
+            )
+            return PipelineResult(
+                job_id=job.id,
+                state=job.state,
+                last_stage=PipelineStage.PROBE,
+                quality=QualityReport(),
+            )
+        stream = select_audio_stream(
+            probe_result,
+            override_index=job.audio_stream_index_override,
+            config=config,
         )
-        asr_decision = context.transcriber.detect_language(samples)
+        duration = probe_result.duration_seconds
+        if job.preview_seconds is not None:
+            offset = job.preview_offset_seconds or 0.0
+            duration = min(duration, offset + job.preview_seconds)
+        fingerprint = compute_fingerprint(root=root, path=video, audio_stream_index=stream.index)
+        if not fingerprint.content_matches(job.fingerprint):
+            raise NasSubtitlesError("media changed before processing", code=ErrorCode.MEDIA_CHANGED)
+        if stop_after is PipelineStage.PROBE:
+            return PipelineResult(
+                job_id=job.id,
+                state=job.state,
+                last_stage=PipelineStage.PROBE,
+                quality=QualityReport(),
+                media_seconds=duration,
+            )
+
+        job = repo.transition(
+            job_id=job.id, state=JobState.RUNNING, stage=PipelineStage.DETECT_LANGUAGE
+        )
+        override = effective_source_override(config, job_override=job.source_language_override)
         decision = decide_source_language(
             config,
             stream=stream,
-            samples=asr_decision.samples,
+            override=override,
             transcriber=context.transcriber,
         )
-    _record_language_decision(context, stream=stream, decision=decision)
-    if not decision.confident or decision.language is None:
-        write_manifest(
-            config,
-            _language_manifest(
-                context,
-                fingerprint=fingerprint,
+        if override is None:
+            samples = _language_sample_chunks(
+                context, video=video, stream_index=stream.index, duration=duration
+            )
+            asr_decision = context.transcriber.detect_language(samples)
+            decision = decide_source_language(
+                config,
                 stream=stream,
-                decision=decision,
-                source_language=None,
-                translation_executed=False,
-            ),
-        )
-        job = repo.transition(
+                samples=asr_decision.samples,
+                transcriber=context.transcriber,
+            )
+        _record_language_decision(context, stream=stream, decision=decision)
+        if not decision.confident or decision.language is None:
+            write_manifest(
+                config,
+                _language_manifest(
+                    context,
+                    fingerprint=fingerprint,
+                    stream=stream,
+                    decision=decision,
+                    source_language=None,
+                    translation_executed=False,
+                ),
+            )
+            job = repo.transition(
+                job_id=job.id,
+                state=JobState.NEEDS_REVIEW,
+                error_code=ErrorCode.LANGUAGE_UNDETERMINED,
+                error_detail=decision.reason,
+            )
+            return PipelineResult(
+                job_id=job.id,
+                state=job.state,
+                last_stage=PipelineStage.DETECT_LANGUAGE,
+                quality=QualityReport(),
+                media_seconds=duration,
+            )
+        language = decision.language
+        if not is_supported_source(language):
+            write_manifest(
+                config,
+                _language_manifest(
+                    context,
+                    fingerprint=fingerprint,
+                    stream=stream,
+                    decision=decision,
+                    source_language=language,
+                    translation_executed=False,
+                ),
+            )
+            job = repo.transition(
+                job_id=job.id,
+                state=JobState.FAILED,
+                error_code=ErrorCode.UNSUPPORTED_LANGUAGE,
+                error_detail=language,
+            )
+            return PipelineResult(
+                job_id=job.id,
+                state=job.state,
+                last_stage=PipelineStage.DETECT_LANGUAGE,
+                quality=QualityReport(),
+                media_seconds=duration,
+            )
+        _write_language_checkpoint(
+            _language_checkpoint_path(config, job.id),
             job_id=job.id,
-            state=JobState.NEEDS_REVIEW,
-            error_code=ErrorCode.LANGUAGE_UNDETERMINED,
-            error_detail=decision.reason,
+            fingerprint=fingerprint,
+            stage_config_hash=language_stage_hash,
+            stream=stream,
+            decision=decision,
+            duration_seconds=duration,
         )
-        return PipelineResult(
+        if stop_after is PipelineStage.DETECT_LANGUAGE:
+            return PipelineResult(
+                job_id=job.id,
+                state=job.state,
+                last_stage=PipelineStage.DETECT_LANGUAGE,
+                quality=QualityReport(),
+                media_seconds=duration,
+            )
+    else:
+        language_checkpoint = _read_language_checkpoint(
+            _language_checkpoint_path(config, job.id),
             job_id=job.id,
-            state=job.state,
-            last_stage=PipelineStage.DETECT_LANGUAGE,
-            quality=QualityReport(),
-            media_seconds=duration,
+            stage_config_hash=language_stage_hash,
         )
-    language = decision.language
-    if not is_supported_source(language):
-        write_manifest(
-            config,
-            _language_manifest(
-                context,
-                fingerprint=fingerprint,
-                stream=stream,
-                decision=decision,
-                source_language=language,
-                translation_executed=False,
-            ),
-        )
-        job = repo.transition(
-            job_id=job.id,
-            state=JobState.FAILED,
-            error_code=ErrorCode.UNSUPPORTED_LANGUAGE,
-            error_detail=language,
-        )
-        return PipelineResult(
-            job_id=job.id,
-            state=job.state,
-            last_stage=PipelineStage.DETECT_LANGUAGE,
-            quality=QualityReport(),
-            media_seconds=duration,
-        )
-    if stop_after is PipelineStage.DETECT_LANGUAGE:
-        return PipelineResult(
-            job_id=job.id,
-            state=job.state,
-            last_stage=PipelineStage.DETECT_LANGUAGE,
-            quality=QualityReport(),
-            media_seconds=duration,
-        )
+        if language_checkpoint is None:
+            raise NasSubtitlesError(
+                f"no valid checkpoint to resume job {job.id} from {start_stage}",
+                code=ErrorCode.CHECKPOINT_INVALID,
+                detail={"job_id": job.id, "start_stage": str(start_stage)},
+            )
+        stream = language_checkpoint.stream
+        decision = language_checkpoint.decision
+        duration = language_checkpoint.duration_seconds
+        if decision.language is None:
+            raise NasSubtitlesError(
+                "checkpoint recorded an undetermined language",
+                code=ErrorCode.CHECKPOINT_INVALID,
+                detail={"job_id": job.id},
+            )
+        language = decision.language
+        fingerprint = compute_fingerprint(root=root, path=video, audio_stream_index=stream.index)
+        if (
+            fingerprint.digest() != language_checkpoint.fingerprint_digest
+            or not fingerprint.content_matches(job.fingerprint)
+        ):
+            raise NasSubtitlesError(
+                "media changed since the checkpoint was written",
+                code=ErrorCode.MEDIA_CHANGED,
+            )
 
     job = repo.transition(job_id=job.id, state=JobState.RUNNING, stage=PipelineStage.EXTRACT)
     specs = plan_chunks(
@@ -548,6 +607,105 @@ def _maybe_publish_sidecar(
         cue_count=cue_count,
         media_seconds=media_seconds,
     )
+
+
+_LANGUAGE_CHECKPOINT_SCHEMA_VERSION = 1
+"""Bumping this invalidates resume checkpoints for the language decision."""
+
+
+def _language_checkpoint_path(config: AppConfig, job_id: str) -> Path:
+    return config.work_dir / job_id / "language-decision.json"
+
+
+@dataclass(frozen=True, slots=True)
+class _LanguageCheckpoint:
+    fingerprint_digest: str
+    stream: AudioStreamInfo
+    decision: LanguageDecision
+    duration_seconds: Seconds
+
+
+def _write_language_checkpoint(
+    path: Path,
+    *,
+    job_id: str,
+    fingerprint: MediaFingerprint,
+    stage_config_hash: str,
+    stream: AudioStreamInfo,
+    decision: LanguageDecision,
+    duration_seconds: Seconds,
+) -> None:
+    """Write to a temporary file, flush, then rename on the same filesystem."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "schema_version": _LANGUAGE_CHECKPOINT_SCHEMA_VERSION,
+        "job_id": job_id,
+        "fingerprint_digest": fingerprint.digest(),
+        "stage_config_hash": stage_config_hash,
+        "duration_seconds": duration_seconds,
+        "stream": {
+            "index": stream.index,
+            "language": stream.language,
+            "raw_language_tag": stream.raw_language_tag,
+            "start_time_seconds": stream.start_time_seconds,
+        },
+        "decision": {
+            "language": decision.language,
+            "source": str(decision.source),
+            "confident": decision.confident,
+            "probability": decision.probability,
+            "reason": decision.reason,
+        },
+    }
+    tmp = path.with_name(f"{path.name}.tmp-{uuid.uuid4().hex}")
+    tmp.write_text(json.dumps(payload), encoding="utf-8")
+    tmp.replace(path)
+
+
+def _read_language_checkpoint(
+    path: Path, *, job_id: str, stage_config_hash: str
+) -> _LanguageCheckpoint | None:
+    """Return the checkpoint only when job, schema and stage config hash all
+    match; otherwise ``None`` so the caller can report ``checkpoint_invalid``
+    rather than silently resuming from the wrong decision."""
+    if not path.is_file():
+        return None
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    if not isinstance(payload, dict):
+        return None
+    if payload.get("schema_version") != _LANGUAGE_CHECKPOINT_SCHEMA_VERSION:
+        return None
+    if payload.get("job_id") != job_id:
+        return None
+    if payload.get("stage_config_hash") != stage_config_hash:
+        return None
+    try:
+        stream_payload = payload["stream"]
+        decision_payload = payload["decision"]
+        stream = AudioStreamInfo(
+            index=int(stream_payload["index"]),
+            language=stream_payload.get("language"),
+            raw_language_tag=stream_payload.get("raw_language_tag"),
+            start_time_seconds=float(stream_payload["start_time_seconds"]),
+        )
+        decision = LanguageDecision(
+            language=decision_payload["language"],
+            source=LanguageSource(decision_payload["source"]),
+            confident=bool(decision_payload["confident"]),
+            probability=decision_payload.get("probability"),
+            reason=str(decision_payload.get("reason", "")),
+        )
+        return _LanguageCheckpoint(
+            fingerprint_digest=str(payload["fingerprint_digest"]),
+            stream=stream,
+            decision=decision,
+            duration_seconds=float(payload["duration_seconds"]),
+        )
+    except (KeyError, TypeError, ValueError):
+        return None
 
 
 def _language_manifest(

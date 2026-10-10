@@ -22,6 +22,7 @@ from nas_subtitles.domain import (
     ModelIdentity,
     ModelKind,
     NasSubtitlesError,
+    PipelineStage,
     PublishMode,
     TranscriptSegment,
     TranslatedUnit,
@@ -397,3 +398,124 @@ def test_missing_pair_fails_only_that_target(config: AppConfig, media_root: Path
     # exception is isolated from the successful pt-BR result.
     assert refreshed["pt-BR"] is not None
     assert refreshed["pt-BR"].state is not JobState.FAILED
+
+
+def test_start_stage_extract_resumes_without_rerunning_detection(
+    config: AppConfig, media_root: Path
+) -> None:
+    video = media_root / "episode.mkv"
+    _write_clip(video)
+    repo = open_repository(config)
+    job, skipped = enqueue_path(config, repo, video, require_stability=False)
+    assert skipped is None and job is not None
+    transcriber = _FakeTranscriber(language="en", probability=0.95)
+    translator = _FakeTranslator()
+    first = run_job(
+        _context(config, repo, job, transcriber=transcriber, translator=translator),
+        stop_after=PipelineStage.DETECT_LANGUAGE,
+    )
+    assert first.last_stage is PipelineStage.DETECT_LANGUAGE
+    assert transcriber.detect_calls == 1
+    resumed_job = repo.get_job(job.id)
+    assert resumed_job is not None
+    result = run_job(
+        _context(config, repo, resumed_job, transcriber=transcriber, translator=translator),
+        start_stage=PipelineStage.EXTRACT,
+    )
+    repo.close()
+    assert transcriber.detect_calls == 1, "resume must not repeat language detection"
+    assert result.output_path is not None
+    assert "ola" in result.output_path.read_text(encoding="utf-8").lower()
+
+
+def test_start_stage_render_resumes_from_the_same_checkpoint(
+    config: AppConfig, media_root: Path
+) -> None:
+    video = media_root / "episode.mkv"
+    _write_clip(video)
+    repo = open_repository(config)
+    job, skipped = enqueue_path(config, repo, video, require_stability=False)
+    assert skipped is None and job is not None
+    transcriber = _FakeTranscriber(language="en", probability=0.95)
+    translator = _FakeTranslator()
+    run_job(
+        _context(config, repo, job, transcriber=transcriber, translator=translator),
+        stop_after=PipelineStage.DETECT_LANGUAGE,
+    )
+    resumed_job = repo.get_job(job.id)
+    assert resumed_job is not None
+    result = run_job(
+        _context(config, repo, resumed_job, transcriber=transcriber, translator=translator),
+        start_stage=PipelineStage.RENDER,
+    )
+    repo.close()
+    assert transcriber.detect_calls == 1
+    assert result.output_path is not None
+    assert "ola" in result.output_path.read_text(encoding="utf-8").lower()
+
+
+def test_start_stage_without_checkpoint_is_checkpoint_invalid(
+    config: AppConfig, media_root: Path
+) -> None:
+    video = media_root / "episode.mkv"
+    _write_clip(video)
+    repo = open_repository(config)
+    job, skipped = enqueue_path(config, repo, video, require_stability=False, source_language="en")
+    assert skipped is None and job is not None
+    with pytest.raises(NasSubtitlesError) as excinfo:
+        run_job(_context(config, repo, job), start_stage=PipelineStage.EXTRACT)
+    repo.close()
+    assert excinfo.value.code is ErrorCode.CHECKPOINT_INVALID
+
+
+def test_start_stage_rejects_checkpoint_after_language_config_changes(
+    config: AppConfig, media_root: Path
+) -> None:
+    video = media_root / "episode.mkv"
+    _write_clip(video)
+    repo = open_repository(config)
+    job, skipped = enqueue_path(config, repo, video, require_stability=False, source_language="en")
+    assert skipped is None and job is not None
+    transcriber = _FakeTranscriber(language="en", probability=0.95)
+    run_job(
+        _context(config, repo, job, transcriber=transcriber),
+        stop_after=PipelineStage.DETECT_LANGUAGE,
+    )
+    resumed_job = repo.get_job(job.id)
+    assert resumed_job is not None
+    changed_config = config.model_copy(
+        update={"asr": config.asr.model_copy(update={"detection_min_probability": 0.5})}
+    )
+    with pytest.raises(NasSubtitlesError) as excinfo:
+        run_job(
+            _context(changed_config, repo, resumed_job, transcriber=transcriber),
+            start_stage=PipelineStage.EXTRACT,
+        )
+    repo.close()
+    assert excinfo.value.code is ErrorCode.CHECKPOINT_INVALID
+
+
+def test_start_stage_rejects_checkpoint_after_media_changes(
+    config: AppConfig, media_root: Path
+) -> None:
+    video = media_root / "episode.mkv"
+    _write_clip(video)
+    repo = open_repository(config)
+    job, skipped = enqueue_path(config, repo, video, require_stability=False, source_language="en")
+    assert skipped is None and job is not None
+    transcriber = _FakeTranscriber(language="en", probability=0.95)
+    run_job(
+        _context(config, repo, job, transcriber=transcriber),
+        stop_after=PipelineStage.DETECT_LANGUAGE,
+    )
+    resumed_job = repo.get_job(job.id)
+    assert resumed_job is not None
+    with video.open("ab") as handle:
+        handle.write(b"\x00" * 64)
+    with pytest.raises(NasSubtitlesError) as excinfo:
+        run_job(
+            _context(config, repo, resumed_job, transcriber=transcriber),
+            start_stage=PipelineStage.EXTRACT,
+        )
+    repo.close()
+    assert excinfo.value.code is ErrorCode.MEDIA_CHANGED
