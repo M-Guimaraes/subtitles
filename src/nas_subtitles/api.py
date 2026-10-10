@@ -8,12 +8,20 @@ dashboard cannot stop background processing.
 
 from __future__ import annotations
 
+import os
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal, Protocol
 
-from .config import AppConfig
+from pydantic import ValidationError
+
+from .config import (
+    AppConfig,
+    load_config,
+    read_runtime_settings,
+    write_runtime_media_roots,
+)
 from .discovery import ScanSummary, scan
 from .domain import (
     ArtifactRecord,
@@ -128,12 +136,18 @@ _OVERVIEW_ACTIVITY_LIMIT = 10
 """Dashboard v2 §6.3: recent_activity cap."""
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(slots=True)
 class DashboardService:
-    """Read-only config plus the shared queue. Never takes the worker lock."""
+    """Config plus the shared queue. Never takes the worker lock.
+
+    ``config`` is replaced when the media roots are changed from the dashboard;
+    ``settings_writable`` is decided by the HTTP layer (loopback or token).
+    """
 
     config: AppConfig
     repository: OperatorRepository
+    config_path: Path | None = None
+    settings_writable: bool = False
 
     def overview(self) -> dict[str, object]:
         """Counts by state plus worker liveness, for the queue landing page."""
@@ -306,12 +320,82 @@ class DashboardService:
         summary = scan(self.config, self.repository)
         return {"ok": True, "scan": _scan_payload(summary)}
 
+    def update_media_roots(self, paths: object, *, reset: bool = False) -> dict[str, object]:
+        """Change the library roots. Saved in ``state_dir``, never in ``config.yaml``.
+
+        The worker keeps the roots it loaded at startup, so it must be
+        restarted before it can process files under a new root.
+        """
+        if not self.settings_writable:
+            raise NasSubtitlesError(
+                "changing settings needs a loopback bind or a dashboard token",
+                code=ErrorCode.PERMISSION_DENIED,
+            )
+        if reset:
+            if self.config_path is None:
+                raise NasSubtitlesError(
+                    "the config file path is unknown; cannot restore its media roots",
+                    code=ErrorCode.CONFIG_INVALID,
+                )
+            write_runtime_media_roots(self.config.state_dir, None)
+            updated = load_config(self.config_path)
+        else:
+            updated = self._validated_roots(paths)
+            blocked = self._active_jobs_on_removed_roots(updated)
+            if blocked:
+                raise NasSubtitlesError(
+                    f"{blocked} unfinished job(s) still use a library you removed; "
+                    "finish or cancel them first",
+                    code=ErrorCode.CONFIG_INVALID,
+                )
+            write_runtime_media_roots(self.config.state_dir, updated.media_roots)
+        self.config = updated
+        return {**self.settings(), "restart_required": True}
+
+    def _validated_roots(self, paths: object) -> AppConfig:
+        if not isinstance(paths, list) or not paths:
+            raise ValueError("send a non-empty list of library paths")
+        normalised: list[Path] = []
+        for item in paths:
+            text = item.strip() if isinstance(item, str) else ""
+            if not text or not Path(text).is_absolute():
+                raise ValueError(f"{item!r} must be an absolute path")
+            candidate = Path(os.path.normpath(text))
+            if not candidate.is_dir():
+                raise ValueError(f"{candidate} is not a directory this service can see")
+            if not os.access(candidate, os.R_OK | os.X_OK):
+                raise ValueError(f"{candidate} is not readable by this service")
+            normalised.append(candidate)
+        try:
+            return AppConfig.model_validate(
+                {**self.config.model_dump(mode="python"), "media_roots": tuple(normalised)}
+            )
+        except ValidationError as exc:
+            problems = "; ".join(
+                f"{'.'.join(str(part) for part in issue['loc'])}: {issue['msg']}"
+                for issue in exc.errors()
+            )
+            raise ValueError(problems) from exc
+
+    def _active_jobs_on_removed_roots(self, updated: AppConfig) -> int:
+        removed = {root.root_id for root in self.config.roots} - {
+            root.root_id for root in updated.roots
+        }
+        if not removed:
+            return 0
+        jobs = self.repository.list_jobs(states=tuple(QUEUE_STATES), limit=100_000)
+        return sum(1 for job in jobs if job.root_id in removed)
+
     def settings(self) -> dict[str, object]:
-        """Safe operational settings. The dashboard does not write config.yaml."""
+        """Safe operational settings. Only the media roots can be changed here."""
         health = check_health(self.config)
         return {
             "ok": True,
-            "writable": False,
+            "writable": self.settings_writable,
+            "media_roots_overridden": bool(
+                read_runtime_settings(self.config.state_dir).get("media_roots")
+            ),
+            "can_reset_media_roots": self.config_path is not None,
             "automatic_processing": health.healthy,
             "worker": _health_payload(health),
             "media_roots": [

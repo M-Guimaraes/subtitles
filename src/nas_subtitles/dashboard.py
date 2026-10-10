@@ -45,6 +45,8 @@ DASHBOARD_TOKEN_ENV = "NAS_SUBS_DASHBOARD_TOKEN"
 STATIC_DIR = Path(__file__).resolve().parent / "static"
 
 _PUBLIC_NETWORK_BINDS = frozenset({"0.0.0.0", "::", "[::]"})
+_LOOPBACK_BINDS = frozenset({"127.0.0.1", "localhost", "::1", "[::1]"})
+_MAX_BODY_BYTES = 64 * 1024
 
 
 @dataclass(frozen=True, slots=True)
@@ -88,10 +90,11 @@ def create_server(
     host: str | None = None,
     port: int | None = None,
     token: str | None = None,
+    config_path: Path | None = None,
 ) -> ThreadingHTTPServer:
     """Build a dashboard server. Does not acquire the worker lock."""
     bind = resolve_dashboard_bind(config, host=host, port=port, token=token)
-    service = DashboardService(config, repository)
+    service = DashboardService(config, repository, config_path=config_path)
     return ThreadingHTTPServer((bind.host, bind.port), make_handler(service, bind))
 
 
@@ -102,11 +105,14 @@ def serve_dashboard(
     host: str | None = None,
     port: int | None = None,
     token: str | None = None,
+    config_path: Path | None = None,
     ready: Callable[[ThreadingHTTPServer], None] | None = None,
 ) -> ThreadingHTTPServer:
     """Start the dashboard and block until the server is shut down."""
     bind = resolve_dashboard_bind(config, host=host, port=port, token=token)
-    server = create_server(config, repository, host=host, port=port, token=token)
+    server = create_server(
+        config, repository, host=host, port=port, token=token, config_path=config_path
+    )
     log_event(
         _LOG,
         "dashboard listening",
@@ -126,6 +132,8 @@ def serve_dashboard(
 
 def make_handler(service: DashboardService, bind: DashboardBind) -> type[BaseHTTPRequestHandler]:
     """Build a request handler closed over the service and bind settings."""
+
+    service.settings_writable = bind.requires_token or bind.host in _LOOPBACK_BINDS
 
     class DashboardHandler(BaseHTTPRequestHandler):
         protocol_version = "HTTP/1.1"
@@ -202,7 +210,27 @@ def make_handler(service: DashboardService, bind: DashboardBind) -> type[BaseHTT
                 return service.rescan()
             if method == "GET" and path == "/api/settings":
                 return service.settings()
+            if method == "POST" and path == "/api/settings/media-roots":
+                body = self._json_body()
+                return service.update_media_roots(
+                    body.get("paths"), reset=body.get("reset") is True
+                )
             raise NasSubtitlesError("not found", code=ErrorCode.JOB_NOT_FOUND)
+
+        def _json_body(self) -> dict[str, object]:
+            try:
+                length = int(self.headers.get("Content-Length", "0"))
+            except ValueError as exc:
+                raise ValueError("invalid Content-Length") from exc
+            if length <= 0 or length > _MAX_BODY_BYTES:
+                raise ValueError("send a JSON body of up to 64 KiB")
+            try:
+                body = json.loads(self.rfile.read(length))
+            except json.JSONDecodeError as exc:
+                raise ValueError("body is not valid JSON") from exc
+            if not isinstance(body, dict):
+                raise ValueError("body must be a JSON object")
+            return body
 
         def _authorised(self) -> bool:
             if not bind.requires_token:

@@ -848,7 +848,14 @@ def dashboard_command(
             as_json=json_output,
             text=f"dashboard on {bind.host}:{bind.port}",
         )
-        dashboard.serve_dashboard(config, repo, host=bind.host, port=bind.port, token=bind.token)
+        dashboard.serve_dashboard(
+            config,
+            repo,
+            host=bind.host,
+            port=bind.port,
+            token=bind.token,
+            config_path=config_path,
+        )
 
 
 @app.command("webhooks")

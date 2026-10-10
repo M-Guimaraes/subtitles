@@ -14,8 +14,8 @@ HTML/CSS/JS que fica em [`src/nas_subtitles/static/`](../src/nas_subtitles/stati
   para o processamento da fila.
 - Ele é **somente leitura sobre a fila**, com três ações pontuais possíveis
   por job: `retry`, `cancel`, `reprocess`. Ele **nunca escreve** em
-  `config.yaml` — a tela "Settings" é um espelho read-only da config carregada
-  pelo worker.
+  `config.yaml` — a tela "Settings" espelha a config carregada, e a única
+  coisa editável ali são as **bibliotecas de mídia** (ver seção 8).
 - Todo acesso a dados passa por uma camada de serviço,
   [`api.py`](../src/nas_subtitles/api.py) (`DashboardService`), que reusa o
   mesmo `JobRepository`, `discovery.scan` e `health.check_health` que o CLI e o
@@ -157,12 +157,22 @@ O dashboard não sabe nada de dublagem "por fora": ele só pede
 
 ## 8. Tela "Settings"
 
-Somente leitura (`GET /api/settings`). Mostra, em cards:
+Leitura (`GET /api/settings`), exceto as bibliotecas de mídia. Mostra, em cards:
 
 - **Automatic processing** — se o heartbeat do worker está recente
   (`health.check_health`) e o motivo quando não está.
-- **Media roots** — os `root_id` configurados (não mostra o caminho real do
-  host por padrão na listagem da tabela, mas aparece aqui).
+- **Media roots** — os `root_id` e caminhos configurados. **Editável**
+  (`POST /api/settings/media-roots`, corpo `{"paths": [...]}` ou
+  `{"reset": true}`): o valor novo é salvo em `state_dir/runtime-settings.json`
+  e sobrepõe o `media_roots` do `config.yaml` (que nunca é reescrito;
+  `load_config` aplica o override, então worker e CLI também o veem). Regras:
+  caminhos absolutos, existentes, legíveis pelo serviço (dentro do contêiner,
+  se Docker), sem repetir/aninhar e sem conter `state_dir`/`work_dir`/
+  `models_dir`/`output_dir`; remover uma biblioteca com job não finalizado
+  é recusado. **O worker só enxerga o novo valor depois de reiniciar** (a tela
+  avisa). A edição só vale com bind em loopback ou com token configurado;
+  num bind público sem token a API devolve `writable: false` e recusa. "Restaurar
+  do config.yaml" apaga o override.
 - **Languages** — idioma de origem configurado (`auto` ou fixo), lista de
   idiomas de destino (`languages.targets`) e a política de baixa confiança.
 - **Audio** — preferência de seleção de faixa (`audio.stream`) e idiomas de
@@ -190,6 +200,7 @@ Toda a UI fala com estas rotas (todas sob `/api/`, todas JSON,
 | POST | `/api/jobs/<id>/reprocess` | `reprocess_job()` | botão "Reprocess" |
 | POST | `/api/scan` | `rescan()` | botão "Rescan library" |
 | GET | `/api/settings` | `settings()` | tela Settings |
+| POST | `/api/settings/media-roots` | `update_media_roots()` | editar bibliotecas |
 
 Erros voltam como `{"ok": false, "error_code": ..., "message": ..., "exit_code": ...}`
 com o HTTP status mapeado em `_status_for` (404 para job não encontrado, 401

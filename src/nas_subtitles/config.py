@@ -18,7 +18,10 @@ Two families of hashes are produced here and consumed elsewhere:
 
 from __future__ import annotations
 
+import json
 import re
+import uuid
+from collections.abc import Sequence
 from pathlib import Path
 from typing import Any, Literal, assert_never
 
@@ -45,6 +48,7 @@ __all__ = [
     "ALLOWED_ASR_MODELS",
     "CONFIG_HASH_SCHEMA_VERSION",
     "DEFAULT_CONFIG_PATH",
+    "RUNTIME_SETTINGS_FILENAME",
     "SOURCE_LANGUAGE_AUTO",
     "AppConfig",
     "AsrConfig",
@@ -60,7 +64,9 @@ __all__ = [
     "WorkerConfig",
     "canonicalize_public_language_tag",
     "load_config",
+    "read_runtime_settings",
     "root_id_for",
+    "write_runtime_media_roots",
 ]
 
 DEFAULT_CONFIG_PATH = Path("/config/config.yaml")
@@ -852,10 +858,61 @@ def load_config(path: Path) -> AppConfig:
     if not isinstance(raw, dict):
         raise ConfigurationError(f"{path} must contain a YAML mapping at the top level")
 
+    raw = _apply_runtime_overrides(raw)
     try:
         return AppConfig.model_validate(raw)
     except ValidationError as exc:
         raise ConfigurationError(_format_validation_error(path, exc)) from exc
+
+
+RUNTIME_SETTINGS_FILENAME = "runtime-settings.json"
+"""Settings changed from the dashboard live here, in ``state_dir``, so that
+``config.yaml`` (often mounted read-only, and full of comments) is never
+rewritten. Only ``media_roots`` is supported today and it overrides the YAML."""
+
+
+def read_runtime_settings(state_dir: Path) -> dict[str, Any]:
+    """Overrides saved from the dashboard; ``{}`` when there are none."""
+    path = state_dir / RUNTIME_SETTINGS_FILENAME
+    if not path.is_file():
+        return {}
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ConfigurationError(f"cannot read runtime settings {path}: {exc}") from exc
+    if not isinstance(payload, dict):
+        raise ConfigurationError(f"{path} must contain a JSON object")
+    return payload
+
+
+def write_runtime_media_roots(state_dir: Path, roots: Sequence[Path] | None) -> None:
+    """Persist the media roots override atomically; ``None`` removes it."""
+    state_dir.mkdir(parents=True, exist_ok=True)
+    path = state_dir / RUNTIME_SETTINGS_FILENAME
+    payload = read_runtime_settings(state_dir)
+    if roots is None:
+        payload.pop("media_roots", None)
+    else:
+        payload["media_roots"] = [str(root) for root in roots]
+    if not payload:
+        path.unlink(missing_ok=True)
+        return
+    temporary = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
+    try:
+        temporary.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        temporary.replace(path)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def _apply_runtime_overrides(raw: dict[str, Any]) -> dict[str, Any]:
+    state = raw.get("state_dir")
+    if not isinstance(state, str) or not Path(state).is_absolute():
+        return raw
+    roots = read_runtime_settings(Path(state)).get("media_roots")
+    if isinstance(roots, list) and roots:
+        return {**raw, "media_roots": roots}
+    return raw
 
 
 def _format_validation_error(path: Path, error: ValidationError) -> str:

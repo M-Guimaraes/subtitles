@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 import json
 import threading
 from datetime import UTC, datetime
@@ -337,10 +338,12 @@ def _request(
     path: str,
     *,
     headers: dict[str, str] | None = None,
+    body: object | None = None,
 ) -> object:
     connection = HTTPConnection(host, port, timeout=5)
     try:
-        connection.request(method, path, headers=headers or {})
+        payload = None if body is None else json.dumps(body).encode("utf-8")
+        connection.request(method, path, body=payload, headers=headers or {})
         response = connection.getresponse()
         body = response.read()
         return type("Response", (), {"status": response.status, "body": body})()
@@ -355,9 +358,147 @@ def _request_json(
     path: str,
     *,
     headers: dict[str, str] | None = None,
+    body: object | None = None,
 ) -> dict[str, object]:
-    response = _request(host, port, method, path, headers=headers)
+    response = _request(host, port, method, path, headers=headers, body=body)
     assert response.status == 200, response.body
     payload = json.loads(response.body.decode("utf-8"))
     assert isinstance(payload, dict)
     return payload
+
+
+def _writable(
+    config: AppConfig, config_path: Path | None = None
+) -> tuple[DashboardService, object]:
+    repo = open_repository(config)
+    service = DashboardService(config, repo, config_path=config_path, settings_writable=True)
+    return service, repo
+
+
+def test_media_roots_change_is_saved_outside_config_yaml(
+    config: AppConfig, config_path: Path, tmp_path: Path
+) -> None:
+    from nas_subtitles.config import load_config
+
+    other = tmp_path / "another-library"
+    other.mkdir()
+    yaml_before = config_path.read_text(encoding="utf-8")
+    service, repo = _writable(config, config_path)
+    result = service.update_media_roots([str(other)])
+    repo.close()
+
+    assert result["restart_required"] is True
+    assert result["media_roots_overridden"] is True
+    assert [item["path"] for item in result["media_roots"]] == [str(other)]
+    assert config_path.read_text(encoding="utf-8") == yaml_before
+    assert load_config(config_path).media_roots == (other,)
+
+
+def test_media_roots_reset_restores_the_config_yaml_value(
+    config: AppConfig, config_path: Path, tmp_path: Path
+) -> None:
+    other = tmp_path / "another-library"
+    other.mkdir()
+    service, repo = _writable(config, config_path)
+    service.update_media_roots([str(other)])
+    restored = service.update_media_roots(None, reset=True)
+    repo.close()
+
+    assert restored["media_roots_overridden"] is False
+    assert [item["path"] for item in restored["media_roots"]] == [
+        str(root) for root in config.media_roots
+    ]
+
+
+@pytest.mark.parametrize(
+    "bad",
+    [[], "x", ["relative/path"], ["/definitely/not/a/real/dir"], [""]],
+)
+def test_media_roots_rejects_invalid_input(config: AppConfig, bad: object) -> None:
+    service, repo = _writable(config)
+    with pytest.raises(ValueError):
+        service.update_media_roots(bad)
+    repo.close()
+
+
+def test_media_roots_rejects_a_root_that_contains_the_working_dirs(config: AppConfig) -> None:
+    service, repo = _writable(config)
+    with pytest.raises(ValueError, match="never write into the library"):
+        service.update_media_roots([str(config.state_dir.parent)])
+    repo.close()
+
+
+def test_media_roots_refuses_when_not_writable(config: AppConfig, tmp_path: Path) -> None:
+    service, repo = _service(config)
+    with pytest.raises(NasSubtitlesError) as raised:
+        service.update_media_roots([str(tmp_path)])
+    repo.close()
+    assert raised.value.code is ErrorCode.PERMISSION_DENIED
+
+
+def test_media_roots_cannot_drop_a_library_with_unfinished_jobs(
+    config: AppConfig, tmp_path: Path
+) -> None:
+    other = tmp_path / "another-library"
+    other.mkdir()
+    service, repo = _writable(config)
+    root = config.roots[0]
+    repo.enqueue(
+        fingerprint=dataclasses.replace(_fingerprint(), root_id=root.root_id),
+        pipeline_config_hash="h",
+    )
+    with pytest.raises(NasSubtitlesError) as raised:
+        service.update_media_roots([str(other)])
+    repo.close()
+    assert raised.value.code is ErrorCode.CONFIG_INVALID
+    assert "unfinished" in raised.value.message
+
+
+def test_http_media_roots_is_writable_on_loopback_and_validates(
+    config: AppConfig, tmp_path: Path
+) -> None:
+    other = tmp_path / "another-library"
+    other.mkdir()
+    repo = open_repository(config)
+    server = create_server(config, repo, host="127.0.0.1", port=0)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    host, port = server.server_address[:2]
+    try:
+        assert _request_json(host, port, "GET", "/api/settings")["writable"] is True
+        bad = _request(
+            host, port, "POST", "/api/settings/media-roots", body={"paths": ["/nope/nowhere"]}
+        )
+        assert bad.status == 400
+        ok = _request_json(
+            host, port, "POST", "/api/settings/media-roots", body={"paths": [str(other)]}
+        )
+        assert ok["restart_required"] is True
+        assert ok["media_roots"][0]["path"] == str(other)
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2)
+        repo.close()
+
+
+def test_http_media_roots_is_read_only_on_a_public_bind_without_token(
+    config: AppConfig, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv(DASHBOARD_TOKEN_ENV, raising=False)
+    repo = open_repository(config)
+    server = create_server(config, repo, host="0.0.0.0", port=0)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    port = server.server_address[1]
+    try:
+        assert _request_json("127.0.0.1", port, "GET", "/api/settings")["writable"] is False
+        denied = _request(
+            "127.0.0.1", port, "POST", "/api/settings/media-roots", body={"paths": [str(tmp_path)]}
+        )
+        assert denied.status == 401
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2)
+        repo.close()

@@ -76,4 +76,10 @@ export const api = {
   reprocess: (id) => request(`/api/jobs/${encodeURIComponent(id)}/reprocess`, { method: "POST" }),
   scan: () => request("/api/scan", { method: "POST" }),
   settings: (options) => request("/api/settings", options),
+  updateMediaRoots: (body) =>
+    request("/api/settings/media-roots", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    }),
 };
