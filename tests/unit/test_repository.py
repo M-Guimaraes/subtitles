@@ -257,6 +257,99 @@ def test_jobs_list_and_show_round_trip_through_the_cli(
     assert job.id in shown.stdout
 
 
+def test_list_jobs_search_matches_relative_path_case_insensitively(
+    config: AppConfig,
+) -> None:
+    repo = open_repository(config)
+    dexter = _enqueue(repo, "Dexter/S03E01.mkv")
+    _enqueue(repo, "Friends/S01E01.mkv")
+    found = repo.list_jobs(search="dexter")
+    literal_wildcard = repo.list_jobs(search="100%_done")
+    repo.close()
+    assert [job.id for job in found] == [dexter.id]
+    assert literal_wildcard == ()
+
+
+def test_list_jobs_filters_by_job_kind_and_target_language(config: AppConfig) -> None:
+    repo = open_repository(config)
+    subtitle = repo.enqueue(
+        fingerprint=_fingerprint("a.mkv"), pipeline_config_hash="h", target_language="en"
+    )
+    dubbing = repo.enqueue(
+        fingerprint=_fingerprint("b.mkv"),
+        pipeline_config_hash="h",
+        job_kind=JobKind.DUBBING,
+        target_language="pt-BR",
+    )
+    by_kind = repo.list_jobs(job_kind=JobKind.DUBBING)
+    by_target = repo.list_jobs(target_language="en")
+    repo.close()
+    assert [job.id for job in by_kind] == [dubbing.id]
+    assert [job.id for job in by_target] == [subtitle.id]
+
+
+def test_list_jobs_accepts_multiple_states(config: AppConfig) -> None:
+    repo = open_repository(config)
+    failed = _enqueue(repo, "a.mkv")
+    repo.claim_next_job(owner="w", lease_seconds=60)
+    repo.transition(job_id=failed.id, state=JobState.FAILED, error_code=ErrorCode.IO_ERROR)
+    queued = _enqueue(repo, "b.mkv")
+    matched = repo.list_jobs(states=(JobState.FAILED, JobState.QUEUED))
+    repo.close()
+    assert {job.id for job in matched} == {failed.id, queued.id}
+
+
+def test_list_jobs_sort_and_pagination_match_count_jobs(config: AppConfig) -> None:
+    repo = open_repository(config)
+    _enqueue(repo, "b.mkv")
+    _enqueue(repo, "a.mkv")
+    _enqueue(repo, "c.mkv")
+    ascending = repo.list_jobs(sort="title_asc")
+    page_one = repo.list_jobs(sort="title_asc", limit=2, offset=0)
+    page_two = repo.list_jobs(sort="title_asc", limit=2, offset=2)
+    total = repo.count_jobs()
+    repo.close()
+    assert [job.relative_path for job in ascending] == ["a.mkv", "b.mkv", "c.mkv"]
+    assert [job.relative_path for job in page_one] == ["a.mkv", "b.mkv"]
+    assert [job.relative_path for job in page_two] == ["c.mkv"]
+    assert total == 3
+
+
+def test_list_jobs_rejects_unknown_sort_key(config: AppConfig) -> None:
+    repo = open_repository(config)
+    _enqueue(repo)
+    with pytest.raises(ValueError):
+        repo.list_jobs(sort="not-a-real-sort")
+    repo.close()
+
+
+def test_count_by_state_is_mutually_exclusive(config: AppConfig) -> None:
+    repo = open_repository(config)
+    failed = _enqueue(repo, "a.mkv")
+    repo.claim_next_job(owner="w", lease_seconds=60)
+    repo.transition(job_id=failed.id, state=JobState.FAILED, error_code=ErrorCode.IO_ERROR)
+    _enqueue(repo, "b.mkv")
+    _enqueue(repo, "c.mkv")
+    counts = repo.count_by_state()
+    repo.close()
+    assert counts[JobState.FAILED] == 1
+    assert counts[JobState.QUEUED] == 2
+    assert sum(counts.values()) == 3
+
+
+def test_list_recent_job_events_excludes_heartbeat(config: AppConfig) -> None:
+    repo = open_repository(config)
+    job = _enqueue(repo)
+    repo.append_event(
+        JobEvent(level=EventLevel.INFO, code="language_decision", job_id=job.id, payload={})
+    )
+    repo.append_event(JobEvent(level=EventLevel.INFO, code=HEARTBEAT_EVENT_CODE, payload={}))
+    events = repo.list_recent_job_events(limit=10)
+    repo.close()
+    assert [event.code for event in events] == ["language_decision"]
+    assert all(event.job_id is not None for event in events)
+
+
 def test_jobs_cancel_and_retry_cli(config: AppConfig, config_path: Path) -> None:
     repo = open_repository(config)
     job = _enqueue(repo)

@@ -22,6 +22,7 @@ from .api import DashboardService, JobView, OperatorRepository
 from .config import AppConfig
 from .domain import (
     ErrorCode,
+    JobKind,
     JobState,
     NasSubtitlesError,
     exit_code_for,
@@ -176,11 +177,18 @@ def make_handler(service: DashboardService, bind: DashboardBind) -> type[BaseHTT
         def _route(self, method: str, path: str, query: dict[str, list[str]]) -> dict[str, object]:
             if method == "GET" and path == "/api/health":
                 return service.overview()
+            if method == "GET" and path == "/api/overview":
+                return service.dashboard_overview()
             if method == "GET" and path == "/api/jobs":
                 return service.list_jobs(
                     view=_view_param(query),
-                    state=_state_param(query),
+                    states=_states_param(query),
+                    search=_search_param(query),
+                    job_kind=_kind_param(query),
+                    target_language=_target_language_param(query),
+                    sort=_sort_param(query),
                     limit=_limit_param(query),
+                    offset=_offset_param(query),
                 )
             if method == "GET" and path.startswith("/api/jobs/"):
                 return service.get_job(_job_id_from_path(path, suffix=""))
@@ -276,14 +284,59 @@ def _view_param(query: dict[str, list[str]]) -> JobView:
     return raw  # type: ignore[return-value]
 
 
-def _state_param(query: dict[str, list[str]]) -> JobState | None:
+def _states_param(query: dict[str, list[str]]) -> tuple[JobState, ...] | None:
+    """Dashboard v2 §8.4: ``state`` still takes a single value; a comma-separated
+    list (``state=failed,needs_review``) is additive."""
     raw = (query.get("state") or [""])[0]
+    values = [item.strip() for item in raw.split(",") if item.strip()]
+    if not values:
+        return None
+    try:
+        return tuple(JobState(value) for value in values)
+    except ValueError as exc:
+        raise ValueError(f"unknown job state in {raw!r}") from exc
+
+
+def _search_param(query: dict[str, list[str]]) -> str | None:
+    """Dashboard v2 §8.2: filename search, forwarded as-is — the SQL layer
+    (``repository._job_filters``) does the escaping and parameter binding."""
+    raw = (query.get("search") or [""])[0].strip()
+    return raw or None
+
+
+def _kind_param(query: dict[str, list[str]]) -> JobKind | None:
+    """Dashboard v2 §8.3."""
+    raw = (query.get("kind") or [""])[0].strip()
     if not raw:
         return None
     try:
-        return JobState(raw)
+        return JobKind(raw)
     except ValueError as exc:
-        raise ValueError(f"unknown job state {raw!r}") from exc
+        raise ValueError(f"unknown job kind {raw!r}") from exc
+
+
+def _target_language_param(query: dict[str, list[str]]) -> str | None:
+    """No fixed enum here: target languages come from config, not domain."""
+    raw = (query.get("target_language") or [""])[0].strip()
+    return raw or None
+
+
+def _sort_param(query: dict[str, list[str]]) -> str:
+    """Dashboard v2 §8.5: the whitelist itself lives in ``repository.py``
+    (``_JOB_SORT_COLUMNS``), which raises ``ValueError`` -> HTTP 400 on an
+    unknown key instead of silently falling back."""
+    return (query.get("sort") or ["updated_desc"])[0]
+
+
+def _offset_param(query: dict[str, list[str]]) -> int:
+    raw = (query.get("offset") or ["0"])[0]
+    try:
+        value = int(raw)
+    except ValueError as exc:
+        raise ValueError("offset must be an integer") from exc
+    if value < 0:
+        raise ValueError("offset must be >= 0")
+    return value
 
 
 def _limit_param(query: dict[str, list[str]]) -> int:

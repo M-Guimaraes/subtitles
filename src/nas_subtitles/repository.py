@@ -54,6 +54,21 @@ __all__ = ["SqliteJobRepository", "StateDirLock", "open_repository"]
 
 _MIGRATIONS_DIR = Path(__file__).resolve().parent / "migrations"
 
+DEFAULT_JOB_SORT = "updated_desc"
+"""Dashboard v2 Fase 1 (§8.5): whitelisted ``sort`` values for ``list_jobs``."""
+
+_JOB_SORT_COLUMNS: Mapping[str, str] = {
+    "updated_desc": "updated_at DESC",
+    "updated_asc": "updated_at ASC",
+    "created_desc": "created_at DESC",
+    "created_asc": "created_at ASC",
+    # No dedicated title column; relative_path is the closest stand-in and
+    # keeps files grouped by their parent folder, which is good enough at
+    # the library sizes this project targets (see docs/dashboard-v2-audit.md §9.4).
+    "title_asc": "relative_path COLLATE NOCASE ASC",
+    "title_desc": "relative_path COLLATE NOCASE DESC",
+}
+
 
 class StateDirLock:
     """Exclusive ``flock`` on ``state_dir/worker.lock`` (exit code 6 when held)."""
@@ -227,19 +242,83 @@ class SqliteJobRepository:
         return _job_from_row(row) if row is not None else None
 
     def list_jobs(
-        self, *, state: JobState | None = None, limit: int = 100
+        self,
+        *,
+        state: JobState | None = None,
+        states: Sequence[JobState] | None = None,
+        search: str | None = None,
+        job_kind: JobKind | None = None,
+        target_language: str | None = None,
+        sort: str = DEFAULT_JOB_SORT,
+        limit: int = 100,
+        offset: int = 0,
     ) -> tuple[JobRecord, ...]:
-        connection = self._connection_or_raise()
-        if state is None:
-            rows = connection.execute(
-                "SELECT * FROM jobs ORDER BY created_at DESC LIMIT ?", (limit,)
-            ).fetchall()
-        else:
-            rows = connection.execute(
-                "SELECT * FROM jobs WHERE state = ? ORDER BY created_at DESC LIMIT ?",
-                (str(state), limit),
-            ).fetchall()
+        """Dashboard v2 Fase 1 (§8): ``state`` stays the single-value shortcut
+        every existing caller uses; ``states``/``search``/``job_kind``/
+        ``target_language``/``sort``/``offset`` are additive."""
+        order = _job_sort_column(sort)
+        where, params = _job_filters(
+            states=_effective_states(state, states),
+            search=search,
+            job_kind=job_kind,
+            target_language=target_language,
+        )
+        query = f"SELECT * FROM jobs {where} ORDER BY {order}, id ASC LIMIT ? OFFSET ?"
+        rows = self._connection_or_raise().execute(query, (*params, limit, offset)).fetchall()
         return tuple(_job_from_row(row) for row in rows)
+
+    def count_jobs(
+        self,
+        *,
+        state: JobState | None = None,
+        states: Sequence[JobState] | None = None,
+        search: str | None = None,
+        job_kind: JobKind | None = None,
+        target_language: str | None = None,
+    ) -> int:
+        """Same filters as :meth:`list_jobs`, for pagination totals (§8.7)."""
+        where, params = _job_filters(
+            states=_effective_states(state, states),
+            search=search,
+            job_kind=job_kind,
+            target_language=target_language,
+        )
+        row = (
+            self._connection_or_raise()
+            .execute(f"SELECT COUNT(*) AS n FROM jobs {where}", params)
+            .fetchone()
+        )
+        return int(row["n"])
+
+    def count_by_state(self) -> dict[JobState, int]:
+        """One aggregated query for the Overview stat cards (§6.3): never
+        loads every job into memory just to count them."""
+        counts = dict.fromkeys(JobState, 0)
+        rows = (
+            self._connection_or_raise()
+            .execute("SELECT state, COUNT(*) AS n FROM jobs GROUP BY state")
+            .fetchall()
+        )
+        for row in rows:
+            try:
+                counts[JobState(row["state"])] = int(row["n"])
+            except ValueError:
+                continue
+        return counts
+
+    def list_recent_job_events(self, *, limit: int = 10) -> tuple[JobEvent, ...]:
+        """Events tied to a job, most recent first; excludes ``worker_heartbeat``
+        (``job_id IS NULL``), which is not job activity. See the Fase 0 audit
+        (docs/dashboard-v2-audit.md §4): only ``language_decision`` exists today."""
+        rows = (
+            self._connection_or_raise()
+            .execute(
+                "SELECT * FROM events WHERE job_id IS NOT NULL ORDER BY id DESC LIMIT ?",
+                (limit,),
+            )
+            .fetchall()
+        )
+        return tuple(_event_from_row(row) for row in rows)
 
     def claim_next_job(self, *, owner: str, lease_seconds: int) -> JobClaim | None:
         now = datetime.now(tz=UTC)
@@ -813,6 +892,58 @@ def _as_int(value: object) -> int:
             code=ErrorCode.IO_ERROR,
         )
     return value
+
+
+def _effective_states(
+    state: JobState | None, states: Sequence[JobState] | None
+) -> Sequence[JobState] | None:
+    if states is not None:
+        return states
+    return (state,) if state is not None else None
+
+
+def _job_sort_column(sort: str) -> str:
+    try:
+        return _JOB_SORT_COLUMNS[sort]
+    except KeyError as exc:
+        raise ValueError(f"sort must be one of {sorted(_JOB_SORT_COLUMNS)}, got {sort!r}") from exc
+
+
+def _escape_like(term: str) -> str:
+    """Escape ``%``/``_``/the escape char itself so a filename containing
+    them is matched literally, not as a SQL ``LIKE`` wildcard."""
+    return term.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+
+
+def _job_filters(
+    *,
+    states: Sequence[JobState] | None,
+    search: str | None,
+    job_kind: JobKind | None,
+    target_language: str | None,
+) -> tuple[str, list[object]]:
+    """Build a parameterised ``WHERE`` fragment for ``list_jobs``/``count_jobs``.
+
+    Every value is bound, never interpolated, so this is safe against SQL
+    injection regardless of what a caller passes as ``search``.
+    """
+    clauses: list[str] = []
+    params: list[object] = []
+    if states:
+        placeholders = ",".join("?" for _ in states)
+        clauses.append(f"state IN ({placeholders})")
+        params.extend(str(item) for item in states)
+    if search:
+        clauses.append("relative_path LIKE ? ESCAPE '\\' COLLATE NOCASE")
+        params.append(f"%{_escape_like(search)}%")
+    if job_kind is not None:
+        clauses.append("job_kind = ?")
+        params.append(str(job_kind))
+    if target_language is not None:
+        clauses.append("target_language = ?")
+        params.append(target_language)
+    where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+    return where, params
 
 
 def _job_from_row(row: sqlite3.Row) -> JobRecord:

@@ -6,6 +6,7 @@ import json
 import threading
 from datetime import UTC, datetime
 from http.client import HTTPConnection
+from pathlib import Path
 
 import pytest
 from typer.testing import CliRunner
@@ -103,6 +104,13 @@ def test_job_detail_exposes_language_and_retry(config: AppConfig) -> None:
     assert detail["language"]["detection_probability"] == pytest.approx(0.93)
     assert detail["language"]["target_language"] == "pt-BR"
     assert "retry" in detail["actions"]
+    assert detail["progress"] == {
+        "mode": "stage",
+        "stage_index": 6,
+        "stage_total": 9,
+        "stage_percent": None,
+        "overall_percent": None,
+    }
     assert retried["job"]["state"] == "queued"
 
 
@@ -156,6 +164,61 @@ def test_rescan_does_not_take_the_worker_lock(config: AppConfig) -> None:
     assert payload["scan"]["examined"] == 0
 
 
+def test_dashboard_overview_buckets_are_mutually_exclusive(config: AppConfig) -> None:
+    service, repo = _service(config)
+    failed = repo.enqueue(fingerprint=_fingerprint("a.mkv"), pipeline_config_hash="h")
+    repo.claim_next_job(owner="w", lease_seconds=60)
+    repo.transition(job_id=failed.id, state=JobState.FAILED, error_code=ErrorCode.IO_ERROR)
+    repo.enqueue(fingerprint=_fingerprint("b.mkv"), pipeline_config_hash="h")
+    overview = service.dashboard_overview()
+    repo.close()
+    assert overview["stats"]["attention"] == 1
+    assert overview["stats"]["waiting"] == 1
+    assert overview["stats"]["running"] == 0
+    assert sum(overview["stats"].values()) == 2
+    assert [job["id"] for job in overview["attention_jobs"]] == [failed.id]
+    assert overview["worker"]["online"] in (True, False)
+
+
+def test_dashboard_overview_recent_activity_excludes_heartbeat(config: AppConfig) -> None:
+    service, repo = _service(config)
+    job = repo.enqueue(fingerprint=_fingerprint(), pipeline_config_hash="h")
+    repo.append_event(
+        JobEvent(level=EventLevel.INFO, code="language_decision", job_id=job.id, payload={})
+    )
+    repo.append_event(JobEvent(level=EventLevel.INFO, code="worker_heartbeat", payload={}))
+    overview = service.dashboard_overview()
+    repo.close()
+    assert [item["code"] for item in overview["recent_activity"]] == ["language_decision"]
+    assert overview["recent_activity"][0]["job_id"] == job.id
+    assert overview["recent_activity"][0]["title"] == Path(job.relative_path).name
+
+
+def test_list_jobs_search_kind_and_pagination(config: AppConfig) -> None:
+    service, repo = _service(config)
+    repo.enqueue(fingerprint=_fingerprint("Dexter/S03E01.mkv"), pipeline_config_hash="h")
+    repo.enqueue(fingerprint=_fingerprint("Friends/S01E01.mkv"), pipeline_config_hash="h")
+    by_search = service.list_jobs(view="all", search="dexter")
+    first_page = service.list_jobs(view="all", sort="title_asc", limit=1, offset=0)
+    second_page = service.list_jobs(view="all", sort="title_asc", limit=1, offset=1)
+    repo.close()
+    assert len(by_search["jobs"]) == 1
+    assert "dexter" in by_search["jobs"][0]["relative_path"].lower()
+    assert by_search["pagination"]["total"] == 1
+    assert first_page["pagination"] == {"limit": 1, "offset": 0, "total": 2, "has_next": True}
+    assert second_page["pagination"] == {"limit": 1, "offset": 1, "total": 2, "has_next": False}
+    assert first_page["jobs"][0]["id"] != second_page["jobs"][0]["id"]
+
+
+def test_list_jobs_multi_state_must_belong_to_the_view(config: AppConfig) -> None:
+    service, repo = _service(config)
+    repo.enqueue(fingerprint=_fingerprint(), pipeline_config_hash="h")
+    with pytest.raises(NasSubtitlesError) as raised:
+        service.list_jobs(view="queue", states=(JobState.FAILED, JobState.COMPLETED))
+    repo.close()
+    assert raised.value.code is ErrorCode.INVALID_STATE_TRANSITION
+
+
 def test_http_lists_jobs_and_retries(config: AppConfig) -> None:
     repo = open_repository(config)
     job = repo.enqueue(fingerprint=_fingerprint(), pipeline_config_hash="h")
@@ -175,6 +238,32 @@ def test_http_lists_jobs_and_retries(config: AppConfig) -> None:
         assert retried["job"]["state"] == "queued"
         settings = _request_json(host, port, "GET", "/api/settings")
         assert settings["languages"]["target"] == "pt-BR"
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2)
+        repo.close()
+
+
+def test_http_overview_and_extended_job_filters(config: AppConfig) -> None:
+    repo = open_repository(config)
+    job = repo.enqueue(fingerprint=_fingerprint("Dexter/S03E01.mkv"), pipeline_config_hash="h")
+    repo.enqueue(fingerprint=_fingerprint("Friends/S01E01.mkv"), pipeline_config_hash="h")
+    server = create_server(config, repo, host="127.0.0.1", port=0)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    host, port = server.server_address[:2]
+    try:
+        overview = _request_json(host, port, "GET", "/api/overview")
+        assert overview["stats"]["waiting"] == 2
+        assert overview["active_jobs"] == []
+        filtered = _request_json(host, port, "GET", "/api/jobs?search=dexter")
+        assert [item["id"] for item in filtered["jobs"]] == [job.id]
+        assert filtered["pagination"]["total"] == 1
+        bad_sort = _request(host, port, "GET", "/api/jobs?sort=not-a-sort")
+        assert bad_sort.status == 400
+        bad_kind = _request(host, port, "GET", "/api/jobs?kind=not-a-kind")
+        assert bad_kind.status == 400
     finally:
         server.shutdown()
         server.server_close()

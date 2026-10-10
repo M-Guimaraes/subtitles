@@ -8,7 +8,7 @@ dashboard cannot stop background processing.
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal, Protocol
@@ -19,6 +19,7 @@ from .domain import (
     ArtifactRecord,
     ErrorCode,
     JobEvent,
+    JobKind,
     JobMetrics,
     JobRecord,
     JobRepository,
@@ -64,9 +65,42 @@ HISTORY_STATES: frozenset[JobState] = frozenset(
 
 
 class OperatorRepository(JobRepository, Protocol):
-    """``JobRepository`` plus the read helpers the dashboard needs."""
+    """``JobRepository`` plus the read helpers the dashboard needs.
+
+    ``list_jobs`` is redeclared here (not in the shared ``JobRepository``
+    contract in ``domain.py``) with the Dashboard v2 Fase 1 filters: every
+    other caller of the real repository keeps using the narrower signature
+    unchanged. See docs/dashboard-v2-audit.md §9.1.
+    """
 
     def require_job(self, job_id: str) -> JobRecord: ...
+
+    def list_jobs(
+        self,
+        *,
+        state: JobState | None = None,
+        states: Sequence[JobState] | None = None,
+        search: str | None = None,
+        job_kind: JobKind | None = None,
+        target_language: str | None = None,
+        sort: str = "updated_desc",
+        limit: int = 100,
+        offset: int = 0,
+    ) -> tuple[JobRecord, ...]: ...
+
+    def count_jobs(
+        self,
+        *,
+        state: JobState | None = None,
+        states: Sequence[JobState] | None = None,
+        search: str | None = None,
+        job_kind: JobKind | None = None,
+        target_language: str | None = None,
+    ) -> int: ...
+
+    def count_by_state(self) -> dict[JobState, int]: ...
+
+    def list_recent_job_events(self, *, limit: int = 10) -> tuple[JobEvent, ...]: ...
 
     def list_artifacts(
         self, *, job_id: str, stage: PipelineStage | None = None
@@ -88,6 +122,11 @@ _REPROCESS_STATES: frozenset[JobState] = frozenset(
     }
 )
 
+_OVERVIEW_LIST_LIMIT = 5
+"""Dashboard v2 §6.3: active_jobs/attention_jobs cap."""
+_OVERVIEW_ACTIVITY_LIMIT = 10
+"""Dashboard v2 §6.3: recent_activity cap."""
+
 
 @dataclass(frozen=True, slots=True)
 class DashboardService:
@@ -98,10 +137,8 @@ class DashboardService:
 
     def overview(self) -> dict[str, object]:
         """Counts by state plus worker liveness, for the queue landing page."""
-        jobs = self.repository.list_jobs(limit=10_000)
-        counts = {str(state): 0 for state in JobState}
-        for job in jobs:
-            counts[str(job.state)] += 1
+        counts_by_state = self.repository.count_by_state()
+        counts = {str(state): counts_by_state.get(state, 0) for state in JobState}
         health = check_health(self.config)
         return {
             "ok": True,
@@ -113,25 +150,86 @@ class DashboardService:
             "target_languages": list(self.config.target_languages),
         }
 
+    def dashboard_overview(self) -> dict[str, object]:
+        """Dashboard v2 Fase 1 §6: worker health, stat buckets, active/attention
+        jobs and recent activity — all from aggregated queries, never a full
+        table scan. Buckets are mutually exclusive by construction (§6.2);
+        ``skipped``/``cancelled`` jobs are counted in none of them."""
+        health = check_health(self.config)
+        counts = self.repository.count_by_state()
+        stats = {
+            "running": counts.get(JobState.RUNNING, 0),
+            "waiting": counts.get(JobState.QUEUED, 0) + counts.get(JobState.RETRY_WAIT, 0),
+            "completed": counts.get(JobState.COMPLETED, 0),
+            "attention": counts.get(JobState.FAILED, 0) + counts.get(JobState.NEEDS_REVIEW, 0),
+            "ready_to_publish": counts.get(JobState.READY_TO_PUBLISH, 0),
+        }
+        active = self.repository.list_jobs(state=JobState.RUNNING, limit=_OVERVIEW_LIST_LIMIT)
+        attention = self.repository.list_jobs(
+            states=(JobState.FAILED, JobState.NEEDS_REVIEW), limit=_OVERVIEW_LIST_LIMIT
+        )
+        events = self.repository.list_recent_job_events(limit=_OVERVIEW_ACTIVITY_LIMIT)
+        return {
+            "ok": True,
+            "worker": {"online": health.healthy, "reason": health.reason},
+            "stats": stats,
+            "active_jobs": [self._job_payload(job) for job in active],
+            "attention_jobs": [self._job_payload(job) for job in attention],
+            "recent_activity": [self._activity_payload(event) for event in events],
+        }
+
     def list_jobs(
         self,
         *,
         view: JobView = "all",
-        state: JobState | None = None,
+        states: Sequence[JobState] | None = None,
+        search: str | None = None,
+        job_kind: JobKind | None = None,
+        target_language: str | None = None,
+        sort: str = "updated_desc",
         limit: int = 100,
+        offset: int = 0,
     ) -> dict[str, object]:
         allowed = _states_for_view(view)
-        if state is not None and state not in allowed:
-            raise NasSubtitlesError(
-                f"state {state} is not part of the {view} view",
-                code=ErrorCode.INVALID_STATE_TRANSITION,
-                detail={"state": str(state), "view": view},
-            )
-        records = _collect_jobs(self.repository, view=view, state=state, limit=max(limit, 1))
+        if states is not None:
+            invalid = [item for item in states if item not in allowed]
+            if invalid:
+                raise NasSubtitlesError(
+                    f"state {invalid[0]} is not part of the {view} view",
+                    code=ErrorCode.INVALID_STATE_TRANSITION,
+                    detail={"state": str(invalid[0]), "view": view},
+                )
+        effective_states = states
+        if effective_states is None and view != "all":
+            effective_states = tuple(allowed)
+        limit = max(limit, 1)
+        offset = max(offset, 0)
+        records = self.repository.list_jobs(
+            states=effective_states,
+            search=search,
+            job_kind=job_kind,
+            target_language=target_language,
+            sort=sort,
+            limit=limit,
+            offset=offset,
+        )
+        total = self.repository.count_jobs(
+            states=effective_states,
+            search=search,
+            job_kind=job_kind,
+            target_language=target_language,
+        )
+        jobs = [self._job_payload(job) for job in records]
         return {
             "ok": True,
             "view": view,
-            "jobs": [self._job_payload(job) for job in records],
+            "jobs": jobs,
+            "pagination": {
+                "limit": limit,
+                "offset": offset,
+                "total": total,
+                "has_next": offset + len(jobs) < total,
+            },
         }
 
     def get_job(self, job_id: str) -> dict[str, object]:
@@ -141,10 +239,12 @@ class DashboardService:
         events = self.repository.list_events(job_id=job_id, limit=50)
         manifest = read_manifest_payload(self.config, job_id)
         language = _language_from_manifest(manifest) or _language_from_events(events)
+        stages = _stage_progress(job)
         return {
             "ok": True,
             "job": self._job_payload(job, language=language, manifest=manifest),
-            "stages": _stage_progress(job),
+            "stages": stages,
+            "progress": _progress_payload(stages),
             "language": language,
             "models": _models_from_manifest(manifest),
             "artifacts": [
@@ -231,6 +331,12 @@ class DashboardService:
             "existing_subtitle_policy": str(self.config.existing_subtitle_policy),
             "publish_mode": str(self.config.publish_mode),
             "asr_model": self.config.asr.model,
+            "asr_chunk_seconds": self.config.asr.chunk_seconds,
+            "translation_engine": str(self.config.translation.engine),
+            "retry": {
+                "max_attempts": self.config.worker.max_attempts,
+                "delays_seconds": list(self.config.worker.retry_delays_seconds),
+            },
             "dashboard": {
                 "bind": self.config.dashboard.bind,
                 "port": self.config.dashboard.port,
@@ -261,6 +367,20 @@ class DashboardService:
             stored = read_manifest_payload(self.config, job.id) if manifest is None else manifest
             language = _language_from_manifest(stored)
         return job_summary(job, config=self.config, language=language)
+
+    def _activity_payload(self, event: JobEvent) -> dict[str, object]:
+        """Dashboard v2 §7.5: a recent-activity row. Only ``language_decision``
+        exists today (see docs/dashboard-v2-audit.md §4) — ``code`` is passed
+        through as-is rather than inventing a friendly label for events that
+        do not exist yet."""
+        job = self.repository.get_job(event.job_id) if event.job_id else None
+        return {
+            "job_id": event.job_id,
+            "title": Path(job.relative_path).name if job is not None else None,
+            "code": event.code,
+            "level": str(event.level),
+            "created_at": event.created_at.isoformat() if event.created_at else None,
+        }
 
 
 def job_summary(
@@ -317,24 +437,6 @@ def available_actions(job: JobRecord) -> list[str]:
     return actions
 
 
-def _collect_jobs(
-    repository: OperatorRepository,
-    *,
-    view: JobView,
-    state: JobState | None,
-    limit: int,
-) -> tuple[JobRecord, ...]:
-    if state is not None:
-        return repository.list_jobs(state=state, limit=limit)
-    if view == "all":
-        return repository.list_jobs(limit=limit)
-    collected: list[JobRecord] = []
-    for item in _states_for_view(view):
-        collected.extend(repository.list_jobs(state=item, limit=limit))
-    collected.sort(key=lambda job: job.updated_at, reverse=True)
-    return tuple(collected[:limit])
-
-
 def _states_for_view(view: JobView) -> frozenset[JobState]:
     if view == "queue":
         return QUEUE_STATES
@@ -366,6 +468,25 @@ def _stage_progress(job: JobRecord) -> list[dict[str, object]]:
             if row["status"] == "current":
                 row["status"] = "done"
     return rows
+
+
+def _progress_payload(stages: list[dict[str, object]]) -> dict[str, object]:
+    """Dashboard v2 §13.2's ``stage`` mode, built from ``_stage_progress``
+    alone: a 1-based position in the pipeline, never a fabricated percent.
+    ``measured`` needs the worker to persist a chunk total, which it does
+    not do today (docs/dashboard-v2-audit.md §5) — until then this is the
+    only honest mode."""
+    stage_index = 0
+    for position, row in enumerate(stages, start=1):
+        if row["status"] in ("current", "done"):
+            stage_index = position
+    return {
+        "mode": "stage",
+        "stage_index": stage_index,
+        "stage_total": len(stages),
+        "stage_percent": None,
+        "overall_percent": None,
+    }
 
 
 def _language_from_manifest(manifest: Mapping[str, object] | None) -> dict[str, object] | None:
