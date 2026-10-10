@@ -16,10 +16,18 @@ from nas_subtitles.models import (
     _adapt_stanza_resources,
     _download_stanza_tokenizer,
     _ensure_compatible_stanza,
+    _install_demucs,
+    _install_piper,
+    _load_demucs_offline,
+    _load_piper_offline,
     _overlay_stanza_bundle,
     _package_stanza_is_current,
     _stanza_bundle_is_current,
     configure_stanza_offline,
+    install_models,
+    piper_voice_path,
+    read_model_manifest,
+    separation_model_path,
     to_argos_language_code,
     translation_package_path,
     verify_models,
@@ -372,3 +380,150 @@ def test_verify_models_does_not_pass_when_only_the_directory_exists(
     with pytest.raises(NasSubtitlesError) as raised:
         verify_models(config, offline=True)
     assert raised.value.code is ErrorCode.TRANSLATION_PAIR_MISSING
+
+
+def _fake_download_voice(voice: str, destination: Path, force_redownload: bool = False) -> None:
+    del force_redownload
+    destination.mkdir(parents=True, exist_ok=True)
+    (destination / f"{voice}.onnx").write_bytes(b"fake-onnx-weights")
+    (destination / f"{voice}.onnx.json").write_text("{}", encoding="utf-8")
+
+
+def test_install_piper_downloads_voice_and_records_identity(
+    config: AppConfig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr("piper.download_voices.download_voice", _fake_download_voice)
+    monkeypatch.setattr("piper.PiperVoice.load", lambda *_a, **_k: object())
+
+    identity = _install_piper(config)
+
+    assert identity.kind is ModelKind.TTS
+    assert identity.name == config.dubbing.voice
+    assert identity.path == piper_voice_path(config)
+    assert identity.sha256 is not None
+
+
+def test_install_piper_fails_when_download_raises(
+    config: AppConfig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def _boom(*_args: object, **_kwargs: object) -> None:
+        raise RuntimeError("no network")
+
+    monkeypatch.setattr("piper.download_voices.download_voice", _boom)
+
+    with pytest.raises(NasSubtitlesError) as raised:
+        _install_piper(config)
+    assert raised.value.code is ErrorCode.MODEL_MISSING
+
+
+def test_load_piper_offline_fails_when_voice_cannot_load(
+    config: AppConfig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    voice_dir = piper_voice_path(config)
+    voice_dir.mkdir(parents=True)
+
+    def _boom(*_args: object, **_kwargs: object) -> None:
+        raise RuntimeError("bad onnx")
+
+    monkeypatch.setattr("piper.PiperVoice.load", _boom)
+
+    with pytest.raises(NasSubtitlesError) as raised:
+        _load_piper_offline(config, voice_dir)
+    assert raised.value.code is ErrorCode.MODEL_MISSING
+
+
+def _fake_demucs_bag() -> Any:
+    import torch
+
+    linear = torch.nn.Linear(2, 2)
+    with torch.no_grad():
+        linear.weight.fill_(0.5)
+        linear.bias.fill_(0.0)
+    return types.SimpleNamespace(models=[linear])
+
+
+def test_install_demucs_downloads_and_hashes_weights(
+    config: AppConfig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr("demucs.pretrained.get_model", lambda name: _fake_demucs_bag())
+
+    identity = _install_demucs(config)
+
+    assert identity.kind is ModelKind.SEPARATION
+    assert identity.name == "htdemucs"
+    assert identity.path == separation_model_path(config)
+    assert identity.sha256 is not None
+
+
+def test_install_demucs_weights_checksum_is_stable_across_calls(
+    config: AppConfig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr("demucs.pretrained.get_model", lambda name: _fake_demucs_bag())
+
+    first = _install_demucs(config)
+    second = _install_demucs(config)
+
+    assert first.sha256 == second.sha256
+
+
+def test_load_demucs_offline_fails_when_model_cannot_load(
+    config: AppConfig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    destination = separation_model_path(config)
+    destination.mkdir(parents=True)
+
+    def _boom(name: str) -> Any:
+        raise RuntimeError("cache miss")
+
+    monkeypatch.setattr("demucs.pretrained.get_model", _boom)
+
+    with pytest.raises(NasSubtitlesError) as raised:
+        _load_demucs_offline(config, destination)
+    assert raised.value.code is ErrorCode.MODEL_MISSING
+
+
+def test_verify_models_dispatches_tts_and_separation_offline_loaders(
+    config: AppConfig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    voice_dir = piper_voice_path(config)
+    voice_dir.mkdir(parents=True)
+    separation_dir = separation_model_path(config)
+    separation_dir.mkdir(parents=True)
+    write_model_manifest(
+        config,
+        (
+            ModelIdentity(kind=ModelKind.TTS, name=config.dubbing.voice, path=voice_dir),
+            ModelIdentity(kind=ModelKind.SEPARATION, name="htdemucs", path=separation_dir),
+        ),
+    )
+    monkeypatch.setattr("piper.PiperVoice.load", lambda *_a, **_k: object())
+    monkeypatch.setattr("demucs.pretrained.get_model", lambda name: _fake_demucs_bag())
+
+    verified = verify_models(config, offline=True)
+
+    assert {identity.kind for identity in verified} == {ModelKind.TTS, ModelKind.SEPARATION}
+
+
+def test_install_models_installs_whisper_argos_piper_and_demucs(
+    config: AppConfig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def _fake_install(kind: ModelKind, name: str) -> Any:
+        return lambda _config: ModelIdentity(kind=kind, name=name, path=config.models_dir)
+
+    monkeypatch.setattr(
+        "nas_subtitles.models._install_whisper", _fake_install(ModelKind.ASR, "whisper")
+    )
+    monkeypatch.setattr(
+        "nas_subtitles.models._install_argos", _fake_install(ModelKind.TRANSLATION, "argos")
+    )
+    monkeypatch.setattr(
+        "nas_subtitles.models._install_piper", _fake_install(ModelKind.TTS, "piper")
+    )
+    monkeypatch.setattr(
+        "nas_subtitles.models._install_demucs", _fake_install(ModelKind.SEPARATION, "demucs")
+    )
+
+    installed = install_models(config)
+
+    assert [identity.name for identity in installed] == ["whisper", "argos", "piper", "demucs"]
+    assert read_model_manifest(config) == installed

@@ -15,6 +15,8 @@ dependencies = [
     "srt",
     "torch==2.14.1+cpu; sys_platform == 'linux'",
     "torch==2.14.1; sys_platform == 'darwin'",
+    "piper-tts>=1.8.0",
+    "demucs>=4.0.1",
 ]
 
 [project.scripts]

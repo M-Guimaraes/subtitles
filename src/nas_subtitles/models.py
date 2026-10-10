@@ -14,6 +14,8 @@ import os
 import shutil
 import sys
 import tempfile
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
@@ -35,7 +37,9 @@ __all__ = [
     "configure_argos_environment",
     "configure_stanza_offline",
     "install_models",
+    "piper_voice_path",
     "read_model_manifest",
+    "separation_model_path",
     "to_argos_language_code",
     "translation_package_path",
     "verify_models",
@@ -50,6 +54,12 @@ _ARGOS_LICENSE = "MIT / CC-BY-SA (package metadata)"
 _WHISPER_LICENSE = "MIT (faster-whisper) / Whisper weights per origin"
 _ARGOS_PROBE_PHRASE = "Hello."
 _STANZA_OFFLINE_FLAG = "_nas_subtitles_offline"
+
+_PIPER_VOICE_REPO = "https://huggingface.co/rhasspy/piper-voices"
+_PIPER_LICENSE = "MIT (piper) / voice weights licensed per rhasspy/piper-voices"
+_DEMUCS_MODEL_NAME = "htdemucs"
+"""Fase 2 benchmark baseline (roadmap 006): 4-stem split, vocals = dialogue."""
+_DEMUCS_LICENSE = "MIT (demucs) / weights per adefossez/HTDemucs on the HF hub"
 
 ARGOS_LANGUAGE_CODES = {"pt-BR": "pb"}
 """Public config tags that Argos names differently. ``pb`` is Argos-only."""
@@ -72,6 +82,16 @@ def _argos_pair(*, source: str, target: str) -> tuple[str, str]:
 def asr_model_path(config: AppConfig) -> Path:
     """Absolute local directory of the Whisper model, never a hub alias."""
     return config.asr_models_dir / config.asr.model
+
+
+def piper_voice_path(config: AppConfig) -> Path:
+    """Absolute local directory of the configured Piper voice."""
+    return config.tts_models_dir / config.dubbing.voice
+
+
+def separation_model_path(config: AppConfig) -> Path:
+    """Absolute local directory of the installed dialogue-separation model."""
+    return config.separation_models_dir / _DEMUCS_MODEL_NAME
 
 
 def translation_package_path(config: AppConfig, *, source: str, target: str) -> Path:
@@ -351,9 +371,16 @@ def install_models(config: AppConfig) -> tuple[ModelIdentity, ...]:
     """Download the Whisper model and the direct Argos pair, then record them.
 
     Fails with a concrete instruction when the direct pair is unavailable
-    rather than falling back to a pivot language or a remote service.
+    rather than falling back to a pivot language or a remote service. Also
+    installs the dubbing models (roadmap 006 fase 2): the configured Piper
+    voice and the Demucs baseline separation model.
     """
-    installed = (_install_whisper(config), _install_argos(config))
+    installed = (
+        _install_whisper(config),
+        _install_argos(config),
+        _install_piper(config),
+        _install_demucs(config),
+    )
     write_model_manifest(config, installed)
     return installed
 
@@ -362,9 +389,11 @@ def verify_models(config: AppConfig, *, offline: bool = True) -> tuple[ModelIden
     """Check that every model in the manifest is present and loadable offline.
 
     A directory on disk is not enough: Whisper must load with
-    ``local_files_only``, and Argos must recognize the configured direct pair
+    ``local_files_only``, Argos must recognize the configured direct pair
     (``en->pb`` when the public target is ``pt-BR``) and translate a short
-    probe phrase without touching the network.
+    probe phrase without touching the network, the Piper voice must load
+    with ``PiperVoice.load``, and the Demucs separation model must load with
+    ``HF_HUB_OFFLINE`` set — none of this touches the network.
     """
     del offline  # Verification never reaches the network.
     identities = read_model_manifest(config)
@@ -385,9 +414,10 @@ def verify_models(config: AppConfig, *, offline: bool = True) -> tuple[ModelIden
             _load_whisper_offline(config, identity.path)
         elif identity.kind is ModelKind.TRANSLATION:
             _verify_argos_offline(config)
-        elif identity.kind in {ModelKind.TTS, ModelKind.SEPARATION}:
-            # Presence on disk is enough until the dubbing engines land.
-            pass
+        elif identity.kind is ModelKind.TTS:
+            _load_piper_offline(config, identity.path)
+        elif identity.kind is ModelKind.SEPARATION:
+            _load_demucs_offline(config, identity.path)
         verified.append(identity)
     return tuple(verified)
 
@@ -624,6 +654,139 @@ def _load_whisper_offline(config: AppConfig, model_path: Path) -> None:
             code=ErrorCode.MODEL_MISSING,
             detail={"path_token": path_token(model_path)},
         ) from exc
+
+
+def _install_piper(config: AppConfig) -> ModelIdentity:
+    from piper.download_voices import download_voice
+
+    voice = config.dubbing.voice
+    destination = piper_voice_path(config)
+    destination.mkdir(parents=True, exist_ok=True)
+    try:
+        download_voice(voice, destination)
+    except Exception as exc:
+        raise NasSubtitlesError(
+            f"failed to download Piper voice {voice}; rerun `nas-subs models install` "
+            "on a networked machine",
+            code=ErrorCode.MODEL_MISSING,
+            detail={"voice": voice},
+        ) from exc
+    _load_piper_offline(config, destination)
+    digest = _directory_checksum(destination)
+    return ModelIdentity(
+        kind=ModelKind.TTS,
+        name=voice,
+        path=destination,
+        version=voice,
+        sha256=digest,
+        source=f"{_PIPER_VOICE_REPO}/{voice}",
+        license=_PIPER_LICENSE,
+    )
+
+
+def _load_piper_offline(config: AppConfig, voice_dir: Path) -> None:
+    del config  # Piper needs no config-specific device/offline flags yet.
+    from piper import PiperVoice
+
+    voice_name = voice_dir.name
+    model_path = voice_dir / f"{voice_name}.onnx"
+    config_path = voice_dir / f"{voice_name}.onnx.json"
+    try:
+        PiperVoice.load(model_path, config_path=config_path)
+    except Exception as exc:
+        raise NasSubtitlesError(
+            "Piper voice could not be loaded offline from the local path",
+            code=ErrorCode.MODEL_MISSING,
+            detail={"path_token": path_token(voice_dir)},
+        ) from exc
+
+
+def _install_demucs(config: AppConfig) -> ModelIdentity:
+    destination = separation_model_path(config)
+    destination.mkdir(parents=True, exist_ok=True)
+    with _hf_home(destination):
+        from demucs.pretrained import get_model
+
+        try:
+            get_model(_DEMUCS_MODEL_NAME)
+        except Exception as exc:
+            raise NasSubtitlesError(
+                f"failed to download the {_DEMUCS_MODEL_NAME} separation model; "
+                "rerun `nas-subs models install` on a networked machine",
+                code=ErrorCode.MODEL_MISSING,
+                detail={"model": _DEMUCS_MODEL_NAME},
+            ) from exc
+    model = _load_demucs_offline(config, destination)
+    digest = _demucs_weights_checksum(model)
+    return ModelIdentity(
+        kind=ModelKind.SEPARATION,
+        name=_DEMUCS_MODEL_NAME,
+        path=destination,
+        version=_DEMUCS_MODEL_NAME,
+        sha256=digest,
+        source=f"hf:adefossez/HTDemucs ({_DEMUCS_MODEL_NAME})",
+        license=_DEMUCS_LICENSE,
+    )
+
+
+def _load_demucs_offline(config: AppConfig, destination: Path) -> Any:
+    del config  # Demucs needs no config-specific device/offline flags yet.
+    with _hf_home(destination, offline=True):
+        from demucs.pretrained import get_model
+
+        try:
+            return get_model(_DEMUCS_MODEL_NAME)
+        except Exception as exc:
+            raise NasSubtitlesError(
+                "separation model could not be loaded offline from the local path",
+                code=ErrorCode.MODEL_MISSING,
+                detail={"path_token": path_token(destination)},
+            ) from exc
+
+
+def _demucs_weights_checksum(model: Any) -> str:
+    """Hash a Demucs bag's tensor weights directly.
+
+    Independent of the HuggingFace hub cache layout under ``destination``:
+    that directory also holds lock files, a refs pointer and (depending on
+    the installed ``hf_xet`` version) shared content-addressed blobs that
+    get materialized lazily, so hashing the directory tree is not stable
+    across runs even when the weights themselves never change.
+    """
+    digest = hashlib.sha256()
+    sub_models = getattr(model, "models", [model])
+    for sub_model in sub_models:
+        for name, tensor in sorted(sub_model.state_dict().items()):
+            digest.update(name.encode("utf-8"))
+            digest.update(tensor.detach().cpu().numpy().tobytes())
+    return digest.hexdigest()
+
+
+@contextmanager
+def _hf_home(path: Path, *, offline: bool = False) -> Iterator[None]:
+    """Point the HuggingFace hub cache at ``path`` for the duration of a call.
+
+    Demucs resolves ``hf_hub_download`` lazily, so the cache directory only
+    needs to be correct while the call is in flight. ``offline`` forces
+    ``HF_HUB_OFFLINE`` so a verify can never silently reach the network.
+    """
+    previous_home = os.environ.get("HF_HOME")
+    previous_offline = os.environ.get("HF_HUB_OFFLINE")
+    os.environ["HF_HOME"] = str(path)
+    if offline:
+        os.environ["HF_HUB_OFFLINE"] = "1"
+    try:
+        yield
+    finally:
+        if previous_home is None:
+            os.environ.pop("HF_HOME", None)
+        else:
+            os.environ["HF_HOME"] = previous_home
+        if offline:
+            if previous_offline is None:
+                os.environ.pop("HF_HUB_OFFLINE", None)
+            else:
+                os.environ["HF_HUB_OFFLINE"] = previous_offline
 
 
 def _directory_checksum(path: Path) -> str:

@@ -265,21 +265,28 @@ def _doctor_checks(config: AppConfig) -> list[DoctorCheck]:
             )
         )
 
-    piper_voice = config.tts_models_dir / config.dubbing.voice
-    if piper_voice.exists():
+    piper_voice = models.piper_voice_path(config)
+    separation_model = models.separation_model_path(config)
+    if piper_voice.exists() and separation_model.exists():
         checks.append(
             DoctorCheck(
                 "dubbing",
                 "ok",
-                f"profile={config.dubbing.profile} voice={config.dubbing.voice}",
+                f"profile={config.dubbing.profile} voice={config.dubbing.voice} "
+                f"separator={separation_model.name}",
             )
         )
     else:
+        missing = [
+            label
+            for label, path in (("voice", piper_voice), ("separator", separation_model))
+            if not path.exists()
+        ]
         checks.append(
             DoctorCheck(
                 "dubbing",
                 "pending",
-                "synthesis models are not installed; nas-subs dub process needs them later",
+                f"missing: {', '.join(missing)}; run `nas-subs models install`",
             )
         )
     return checks
@@ -372,9 +379,11 @@ def models_install(
     config_path: Path = _CONFIG_OPTION,
     json_output: bool = _JSON_OPTION,
 ) -> None:
-    """Download the Whisper model and the direct en->pt Argos package.
+    """Download the ASR/translation models and the dubbing models.
 
-    The only command allowed to use the network.
+    Whisper, the direct en->pt Argos package, the configured Piper voice and
+    the Demucs separation baseline (roadmap 006 fase 2). The only command
+    allowed to use the network.
     """
     with _handled(as_json=json_output):
         config = _load(config_path)
