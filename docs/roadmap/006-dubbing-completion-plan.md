@@ -205,3 +205,11 @@ takes invadem o segmento seguinte (`overlap_unresolved`) e o pico ficou em
 +0,1 dBTP (`clipping_detected`). Faltam: adaptação de texto ao tempo do slot,
 limitador/normalização na mixagem, persistência dos `synthesis_artifacts` no
 repositório (hoje só em disco) e a avaliação auditiva humana.
+
+### Dublagem pausada por configuração
+
+Por decisão do usuário, a dublagem fica desligada por enquanto: `dubbing.enabled`
+vale `false` por padrão. Com isso, `nas-subs dub enqueue/process` e qualquer job
+de dublagem já na fila falham com `config_invalid` ("dubbing is disabled"), e o
+`doctor` mostra `dubbing: disabled`. A geração de legendas não muda, e `enabled`
+não entra em nenhum hash de job. Para voltar a usar: `dubbing.enabled: true`.

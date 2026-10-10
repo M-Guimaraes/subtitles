@@ -74,6 +74,9 @@ webhooks:
   #   - host_prefix: /nas/media
   #     container_prefix: /media
 dubbing:
+  # Dubbing is paused by default: `nas-subs dub ...` and queued dubbing jobs refuse to
+  # run until this is true. Subtitle generation is unaffected.
+  enabled: false
   # cpu-fixed is the MVP voice. mac-clone is experimental and not installed yet.
   profile: cpu-fixed
   target_language: pt-BR

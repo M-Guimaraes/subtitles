@@ -63,6 +63,13 @@ from nas_subtitles.repository import open_repository
 runner = CliRunner()
 
 
+@pytest.fixture
+def example_config_text(example_config_text: str) -> str:
+    """Dubbing ships paused; these tests exercise it, so switch it on."""
+    assert "enabled: false" in example_config_text
+    return example_config_text.replace("enabled: false", "enabled: true", 1)
+
+
 class _FakeProbe:
     def probe(self, path: Path) -> ProbeResult:
         size = path.stat().st_size if path.is_file() else 0
@@ -872,3 +879,31 @@ def test_fit_takes_speeds_up_overruns_and_flags_the_speed_limit(
 
     assert fitted["s1"].duration_seconds == pytest.approx(1.0 / 1.15, abs=0.05)
     assert [flag.code.value for flag in flags] == ["speed_limit_exceeded"]  # type: ignore[attr-defined]
+
+
+def test_dubbing_is_paused_unless_enabled(config: AppConfig, media_root: Path) -> None:
+    paused = config.model_copy(
+        update={"dubbing": config.dubbing.model_copy(update={"enabled": False})}
+    )
+    video = media_root / "episode.mkv"
+    video.write_bytes(b"media-bytes")
+    repo = open_repository(config)
+    queued = enqueue_dubbing(config, repo, video, require_stability=False, probe=_FakeProbe())
+
+    with pytest.raises(NasSubtitlesError) as on_enqueue:
+        enqueue_dubbing(paused, repo, video, require_stability=False, probe=_FakeProbe())
+    with pytest.raises(NasSubtitlesError) as on_run:
+        run_job(_dub_context(paused, repo, queued.job))
+    repo.close()
+
+    assert on_enqueue.value.code is ErrorCode.CONFIG_INVALID
+    assert on_run.value.code is ErrorCode.CONFIG_INVALID
+
+
+def test_enabled_flag_does_not_change_dubbing_hashes(config: AppConfig) -> None:
+    update = {"enabled": False}
+    paused = config.model_copy(update={"dubbing": config.dubbing.model_copy(update=update)})
+
+    assert config.pipeline_config_hash_for(
+        "pt-BR", job_kind=JobKind.DUBBING
+    ) == paused.pipeline_config_hash_for("pt-BR", job_kind=JobKind.DUBBING)

@@ -95,8 +95,18 @@ __all__ = [
     "export_plan",
     "parse_dubbing_profile",
     "plan_payload",
+    "require_dubbing_enabled",
     "run_dubbing_job",
 ]
+
+
+def require_dubbing_enabled(config: AppConfig) -> None:
+    """Dubbing is opt-in: ``dubbing.enabled`` must be true in the config."""
+    if not config.dubbing.enabled:
+        raise NasSubtitlesError(
+            "dubbing is disabled; set `dubbing.enabled: true` in the config to use it",
+            code=ErrorCode.CONFIG_INVALID,
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -142,6 +152,7 @@ def enqueue_dubbing(
 ) -> DubEnqueueResult:
     """Inspect one path and enqueue a dubbing job. Existing SRT is ignored."""
 
+    require_dubbing_enabled(config)
     moment = now or datetime.now(tz=UTC)
     root, resolved = resolve_explicit_path(config, path)
     if not resolved.is_file():
@@ -299,6 +310,7 @@ def run_dubbing_job(
     config = context.config
     repo = context.repository
     job = context.job
+    require_dubbing_enabled(config)
     if infer_job_kind(job.job_kind) is not JobKind.DUBBING:
         raise NasSubtitlesError(
             "run_dubbing_job received a subtitle job",

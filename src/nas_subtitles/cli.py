@@ -267,7 +267,9 @@ def _doctor_checks(config: AppConfig) -> list[DoctorCheck]:
 
     piper_voice = models.piper_voice_path(config)
     separation_model = models.separation_model_path(config)
-    if piper_voice.exists() and separation_model.exists():
+    if not config.dubbing.enabled:
+        checks.append(DoctorCheck("dubbing", "ok", "disabled (dubbing.enabled: false)"))
+    elif piper_voice.exists() and separation_model.exists():
         checks.append(
             DoctorCheck(
                 "dubbing",

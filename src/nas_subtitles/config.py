@@ -448,6 +448,8 @@ class DubbingConfig(BaseModel):
 
     model_config = _STRICT
 
+    enabled: bool = False
+    """Dubbing is paused unless this is true. Not part of any job hash."""
     profile: DubbingProfile = DubbingProfile.CPU_FIXED
     target_language: str = "pt-BR"
     voice: str = "pt_BR-faber-medium"
@@ -458,6 +460,10 @@ class DubbingConfig(BaseModel):
     @classmethod
     def _public_target(cls, value: str) -> str:
         return canonicalize_public_language_tag(value, field_name="dubbing.target_language")
+
+    def hash_payload(self) -> dict[str, object]:
+        """Settings that change dubbing output; ``enabled`` only gates running."""
+        return self.model_dump(mode="json", exclude={"enabled"})
 
     @field_validator("voice")
     @classmethod
@@ -627,7 +633,7 @@ class AppConfig(BaseModel):
                 {
                     **self._pipeline_hash_payload(target_language),
                     "job_kind": str(kind),
-                    "dubbing": self.dubbing.model_dump(mode="json"),
+                    "dubbing": self.dubbing.hash_payload(),
                 }
             )
         return stable_digest(self._pipeline_hash_payload(target_language))
@@ -783,16 +789,16 @@ class AppConfig(BaseModel):
                     "target_language": target_language,
                 }
             case PipelineStage.SEPARATE:
-                return {"dubbing": self.dubbing.model_dump(mode="json"), "stage": "separate"}
+                return {"dubbing": self.dubbing.hash_payload(), "stage": "separate"}
             case PipelineStage.ADAPT:
                 return {
-                    "dubbing": self.dubbing.model_dump(mode="json"),
+                    "dubbing": self.dubbing.hash_payload(),
                     "target_language": target_language,
                     "normalizer": TRANSLATION_NORMALIZER_VERSION,
                 }
             case PipelineStage.SYNTHESIZE:
                 return {
-                    "dubbing": self.dubbing.model_dump(mode="json"),
+                    "dubbing": self.dubbing.hash_payload(),
                     "voice": self.dubbing.voice,
                     "profile": str(self.dubbing.profile),
                 }
@@ -802,9 +808,9 @@ class AppConfig(BaseModel):
                     "max_speed": self.dubbing.max_speed,
                 }
             case PipelineStage.MIX:
-                return {"dubbing": self.dubbing.model_dump(mode="json"), "stage": "mix"}
+                return {"dubbing": self.dubbing.hash_payload(), "stage": "mix"}
             case PipelineStage.VALIDATE_AUDIO:
-                return {"dubbing": self.dubbing.model_dump(mode="json"), "stage": "validate_audio"}
+                return {"dubbing": self.dubbing.hash_payload(), "stage": "validate_audio"}
             case _:
                 assert_never(stage)
 
