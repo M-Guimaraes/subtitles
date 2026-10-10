@@ -43,7 +43,15 @@ packages = ["src/nas_subtitles"]
 "src/nas_subtitles/migrations/004_job_kind.sql" = "nas_subtitles/migrations/004_job_kind.sql"
 "src/nas_subtitles/static/index.html" = "nas_subtitles/static/index.html"
 "src/nas_subtitles/static/dashboard.css" = "nas_subtitles/static/dashboard.css"
-"src/nas_subtitles/static/dashboard.js" = "nas_subtitles/static/dashboard.js"
+"src/nas_subtitles/static/js/app.js" = "nas_subtitles/static/js/app.js"
+"src/nas_subtitles/static/js/api-client.js" = "nas_subtitles/static/js/api-client.js"
+"src/nas_subtitles/static/js/utils/format.js" = "nas_subtitles/static/js/utils/format.js"
+"src/nas_subtitles/static/js/utils/poll.js" = "nas_subtitles/static/js/utils/poll.js"
+"src/nas_subtitles/static/js/utils/ui.js" = "nas_subtitles/static/js/utils/ui.js"
+"src/nas_subtitles/static/js/pages/overview.js" = "nas_subtitles/static/js/pages/overview.js"
+"src/nas_subtitles/static/js/pages/jobs.js" = "nas_subtitles/static/js/pages/jobs.js"
+"src/nas_subtitles/static/js/pages/job-detail.js" = "nas_subtitles/static/js/pages/job-detail.js"
+"src/nas_subtitles/static/js/pages/settings.js" = "nas_subtitles/static/js/pages/settings.js"
 
 [tool.ruff]
 line-length = 100
