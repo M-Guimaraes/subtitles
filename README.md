@@ -25,7 +25,7 @@ A mídia original permanece intacta. A publicação nunca sobrescreve um arquivo
 
 ## Estado do projeto
 
-Os itens **000–005** do [roadmap](ROADMAP.md) estão concluídos. O item **006** (dublagem pt-BR) está ativo na fase 1: contratos, `job_kind` e CLI; os motores de síntese ainda não existem. A implementação de legendas foi exercitada em um Mac Apple Silicon (`arm64`).
+Os itens **000–005** do [roadmap](ROADMAP.md) estão concluídos. O item **006** (dublagem pt-BR) tem as fases 1 a 3 implementadas, mas está **pausado e desligado por padrão** (`dubbing.enabled: false`); veja [Dublagem](#dublagem-pausada). A implementação de legendas foi exercitada em um Mac Apple Silicon (`arm64`).
 
 | Área | Situação |
 |---|---|
@@ -35,9 +35,9 @@ Os itens **000–005** do [roadmap](ROADMAP.md) estão concluídos. O item **006
 | Implantação em NAS | Ainda não realizada |
 | Piloto em episódio real da biblioteca | Ainda não realizado |
 | Validação em amd64 ou GPU | Ainda não realizada |
-| Dublagem | Fase 1 do item 006: CLI e persistência; síntese ainda não implementada |
+| Dublagem | Fluxo de ponta a ponta com voz fixa implementado e testado só com um preview de 150 s; desligado por padrão, sem avaliação auditiva |
 
-O comando `nas-subs dub` existe para enfileirar e inspecionar jobs de dublagem. `nas-subs dub process` só conclui a etapa `probe` nesta fase; as etapas seguintes retornam `not_implemented`. Os webhooks também não foram exercitados contra instâncias reais de Sonarr/Radarr ou um NAS. Consulte [os resultados de benchmark](docs/benchmark.md) para conhecer as medições disponíveis.
+Os webhooks também não foram exercitados contra instâncias reais de Sonarr/Radarr ou um NAS. Consulte [os resultados de benchmark](docs/benchmark.md) para conhecer as medições disponíveis.
 
 ## Português brasileiro: alcance e limitações
 
@@ -112,7 +112,7 @@ docker compose run --rm -e HF_HUB_OFFLINE=0 subtitles \
   nas-subs models install --config /config/config.yaml
 ```
 
-O comando instala o Whisper configurado — `small` por padrão — e o par Argos direto do destino primário. Para `pt-BR`, o par interno é `en → pb`.
+O comando instala o Whisper configurado — `small` por padrão —, o par Argos direto do destino primário (para `pt-BR`, o par interno é `en → pb`) e os modelos de dublagem: a voz Piper `pt_BR-faber-medium` e o separador Demucs `htdemucs` (cerca de 150 MB a mais). Os modelos de dublagem são baixados mesmo com a dublagem desligada.
 
 Destinos adicionais em `languages.targets` não são instalados por esse comando. Se o par direto não estiver disponível no índice Argos, a instalação falha com orientação; não há tradução por idioma-pivô ou API remota.
 
@@ -246,7 +246,7 @@ O vídeo nunca é remuxado, recodificado, renomeado ou apagado, e seus metadados
 | Comando | Função |
 |---|---|
 | `nas-subs doctor` | Diagnóstico de ambiente, recursos, publicação e modelos |
-| `nas-subs models install` | Instalação de Whisper e do par Argos direto |
+| `nas-subs models install` | Instalação de Whisper, do par Argos direto e dos modelos de dublagem (Piper e Demucs) |
 | `nas-subs models verify` | Verificação dos modelos offline |
 | `nas-subs inspect PATH` | Streams, duração e seleção da faixa de áudio |
 | `nas-subs process PATH` | Processamento imediato sob o mesmo lock do worker |
@@ -259,6 +259,7 @@ O vídeo nunca é remuxado, recodificado, renomeado ou apagado, e seus metadados
 | `nas-subs health` | Heartbeat e banco; utilizado pelo healthcheck Docker |
 | `nas-subs cleanup` | Limpeza restrita a `work_dir`; dry-run até `--apply` |
 | `nas-subs backup` | Backup consistente de configuração, manifesto e SQLite |
+| `nas-subs dub enqueue\|process\|plan` | Dublagem (pausada; exige `dubbing.enabled: true`) |
 | `nas-subs dashboard` | Interface opcional; não processa jobs |
 | `nas-subs webhooks` | Listener Sonarr/Radarr; apenas enfileira |
 
@@ -296,6 +297,7 @@ O arquivo [config/config.example.yaml](config/config.example.yaml) documenta as 
 | Idade mínima do arquivo | 600 s |
 | Concorrência | 1 worker |
 | Webhooks | `127.0.0.1:8788`, sem mapas de caminho |
+| Dublagem | `dubbing.enabled: false` (pausada) |
 
 Vários destinos geram um job por idioma e um arquivo `.<tag>.srt`. A instalação automática de modelos continua limitada ao par do destino primário.
 
@@ -308,6 +310,17 @@ O dashboard executa em outro container. Interrompê-lo não interrompe o worker.
 ```bash
 docker compose -f compose.yaml -f compose.offline.yaml -f compose.dashboard.yaml up -d
 ```
+
+Na execução nativa: `uv run nas-subs dashboard --config /caminho/absoluto/config/config.yaml`.
+
+O que ele permite fazer:
+
+- Ver a fila e o histórico, com busca, filtros, ordenação e paginação, e o detalhe de cada job.
+- Tentar de novo, cancelar e reprocessar jobs; rodar uma varredura da biblioteca.
+- **Excluir jobs finalizados** (concluídos, ignorados, falhos ou cancelados), um a um ou em lote. Só as linhas do job, o manifesto e a pasta de trabalho dele são removidos; vídeos, legendas publicadas e saídas em `output_dir` ficam. Uma nova varredura pode recriar o job se o arquivo ainda não tiver legenda.
+- **Trocar as bibliotecas de mídia** em Configurações. O valor novo é salvo em `state_dir/runtime-settings.json` e sobrepõe `media_roots`; o `config.yaml` não é reescrito. **Reinicie o worker** depois, pois ele só vê o novo valor no início. Remover uma biblioteca com jobs não finalizados é recusado, e a edição só existe com bind em loopback ou token configurado.
+
+Os demais valores de Configurações são somente leitura. Detalhes em [docs/dashboard.md](docs/dashboard.md).
 
 ### Webhooks Sonarr/Radarr
 
@@ -375,6 +388,12 @@ Importações concluídas recebidas por webhook não repetem a janela de estabil
 
 Webhooks repetidos para o mesmo fingerprint retornam o job existente (`already_queued`). Alterar bind, porta, token ou mapas não invalida transcrições.
 
+### Dublagem (pausada)
+
+Há um fluxo de dublagem em pt-BR com voz fixa: separa o diálogo (Demucs), transcreve, traduz, sintetiza com Piper, ajusta o tempo, mixa com o fundo e grava um pacote em staging (`output_dir/<root>/dubbing/<job_id>/`), nunca ao lado do vídeo. Ele está **desligado por padrão**: `nas-subs dub enqueue` e `dub process` recusam com `config_invalid` até que `dubbing.enabled: true` seja definido no `config.yaml`. A geração de legendas não depende dele.
+
+Limitações medidas: um preview real de 150 s terminou em `needs_review`, com a maior parte dos trechos acima do limite de aceleração, porque a adaptação de texto ao tempo da fala ainda não existe; uma só voz fala por todos os personagens; ninguém avaliou o áudio de forma auditiva. Ver [docs/benchmark.md](docs/benchmark.md) e o [plano](docs/roadmap/006-dubbing-completion-plan.md).
+
 ## Uso com Bazarr e Jellyfin
 
 Defina um produtor de legendas por título. O Bazarr pode indexar o SRT gerado e posteriormente substituí-lo; ajuste os perfis ou upgrades dos títulos após o piloto, conforme sua versão.
@@ -399,7 +418,9 @@ O projeto não altera essas aplicações e não utiliza suas chaves de API.
 | [Arquitetura](docs/architecture.md) | Componentes e fluxo de processamento |
 | [Runbook](docs/runbook.md) | Instalação, piloto e recuperação |
 | [Benchmark](docs/benchmark.md) | Medições realizadas e validações pendentes |
+| [Dashboard](docs/dashboard.md) | Telas, API e o que pode ser alterado por ele |
 | [Decisões técnicas](docs/decisions.md) | Justificativas de arquitetura |
+| [Dublagem](docs/roadmap/006-dubbing-completion-plan.md) | Estado verificado e plano do fluxo de dublagem |
 | [Webhooks](docs/roadmap/004-sonarr-radarr-webhooks.md) | Contrato de integração Sonarr/Radarr |
 | [Guia para contribuidores](AGENTS.md) | Regras e responsabilidade dos módulos |
 | [Roadmap](ROADMAP.md) | Itens concluídos e evolução planejada |
