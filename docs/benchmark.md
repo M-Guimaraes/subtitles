@@ -56,3 +56,12 @@ produces; a proper mix needs the original channels (fase 3).
 
 Backend decision: Demucs `htdemucs` stays as the separation baseline. This
 does not measure a full episode, other backends, or the NAS.
+
+### Dubbing preview end to end (roadmap 006 fase 3)
+
+`nas-subs dub process --preview-seconds 150` on the same episode, same Mac, one
+run: 62 s wall for 150 s of media (separation, ASR on the dialogue stem,
+translation, Piper synthesis, mix, true-peak check). Result: `needs_review`
+with 27 `speed_limit_exceeded`, 16 `overlap_unresolved` and 1 `clipping_detected`
+(+0.1 dBTP) across 48 segments. Not listened to by a human; the flags are the
+only quality signal.

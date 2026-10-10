@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import sqlite3
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -19,6 +20,7 @@ from nas_subtitles.domain import (
     DUBBING_PLAN_SCHEMA_VERSION,
     AudioChunk,
     AudioStreamInfo,
+    ChunkTranscript,
     DubbingProfile,
     DubSegment,
     DubSegmentReviewState,
@@ -36,11 +38,19 @@ from nas_subtitles.domain import (
     NasSubtitlesError,
     PipelineStage,
     ProbeResult,
+    SeparatedAudio,
+    SynthesisArtifact,
+    TranscriptSegment,
+    TranslatedUnit,
+    Word,
     infer_job_kind,
     stage_window,
     stages_for,
 )
 from nas_subtitles.dubbing import (
+    DubbingEngines,
+    WavTimelineRenderer,
+    _fit_takes,
     apply_plan,
     enqueue_dubbing,
     export_plan,
@@ -438,7 +448,7 @@ def test_dubbing_extract_stops_there_when_asked(config: AppConfig, media_root: P
     assert extractor.calls == 3
 
 
-def test_dubbing_beyond_extract_is_still_not_implemented(
+def test_dubbing_without_installed_models_is_model_missing(
     config: AppConfig, media_root: Path
 ) -> None:
     video = media_root / "episode.mkv"
@@ -449,8 +459,7 @@ def test_dubbing_beyond_extract_is_still_not_implemented(
     with pytest.raises(NasSubtitlesError) as excinfo:
         run_job(context)
     repo.close()
-    assert excinfo.value.code is ErrorCode.NOT_IMPLEMENTED
-    assert excinfo.value.detail == {"stage": "separate"}
+    assert excinfo.value.code is ErrorCode.MODEL_MISSING
 
 
 def test_cli_dub_enqueue_json(config: AppConfig, media_root: Path, config_path: Path) -> None:
@@ -621,3 +630,245 @@ def test_piper_synthesizer_writes_a_wav_and_describes_it(
             destination=tmp_path / "y.wav",
         )
     assert empty.value.code is ErrorCode.EMPTY_TRANSLATION
+
+
+# --------------------------------------------------------------------------- #
+# Fase 3: the audio stages, driven by fake engines
+# --------------------------------------------------------------------------- #
+
+
+def _identity(kind: ModelKind, name: str) -> ModelIdentity:
+    return ModelIdentity(kind=kind, name=name, path=Path("/models") / name)
+
+
+class _SpeakingTranscriber(_FakeDubTranscriber):
+    def transcribe(self, chunk: AudioChunk, *, language: str) -> ChunkTranscript:
+        index = chunk.spec.index
+        words = (
+            Word("Hello", 0.1, 0.5, 0.9, index),
+            Word("world.", 0.5, 1.0, 0.9, index),
+        )
+        return ChunkTranscript(
+            chunk=chunk.spec,
+            language=language,
+            segments=(TranscriptSegment(0, 0.1, 1.0, "Hello world.", words, chunk_index=index),),
+            model_identity=self.model_identity,
+        )
+
+
+class _FakeTranslator:
+    engine_identity = "fake-translator"
+
+    def supports(self, *, source_language: str, target_language: str) -> bool:
+        return True
+
+    def translate(self, units: object) -> tuple[TranslatedUnit, ...]:
+        return tuple(
+            TranslatedUnit(
+                unit_id=unit.unit_id,  # type: ignore[attr-defined]
+                source_text=unit.source_text,  # type: ignore[attr-defined]
+                translated_text="Olá mundo.",
+                source_language=unit.source_language,  # type: ignore[attr-defined]
+                target_language=unit.target_language,  # type: ignore[attr-defined]
+                engine_identity=self.engine_identity,
+            )
+            for unit in units  # type: ignore[attr-defined]
+        )
+
+
+class _FakeSeparator:
+    model_identity = _identity(ModelKind.SEPARATION, "fake-separator")
+
+    def separate(self, chunk: AudioChunk, *, destination_dir: Path) -> SeparatedAudio:
+        destination_dir.mkdir(parents=True, exist_ok=True)
+        dialogue = destination_dir / f"dialogue-{chunk.spec.index}.wav"
+        background = destination_dir / f"accompaniment-{chunk.spec.index}.wav"
+        _write_test_wav(dialogue, seconds=chunk.spec.extract_duration_seconds)
+        _write_test_wav(background, seconds=chunk.spec.extract_duration_seconds)
+        return SeparatedAudio(
+            chunk=chunk.spec,
+            dialogue_path=dialogue,
+            accompaniment_path=background,
+            model_identity=self.model_identity,
+        )
+
+
+class _FakeSynthesizer:
+    model_identity = _identity(ModelKind.TTS, "fake-voice")
+
+    def __init__(self, *, seconds: float = 0.5) -> None:
+        self.texts: list[str] = []
+        self.seconds = seconds
+
+    def synthesize(
+        self, segment: DubSegment, *, voice: object, destination: Path
+    ) -> SynthesisArtifact:
+        self.texts.append(segment.adapted_text or segment.translated_text)
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        _write_test_wav(destination, seconds=self.seconds, rate=22_050)
+        return SynthesisArtifact(
+            job_id=segment.job_id,
+            segment_id=segment.segment_id,
+            revision=segment.revision,
+            path=destination,
+            duration_seconds=self.seconds,
+            model_identity=self.model_identity.identity_token(),
+            sha256="0" * 64,
+        )
+
+
+class _FakeMixer:
+    def mix(self, *, dialogue: Path, accompaniment: Path | None, destination: Path) -> Path:
+        assert dialogue.is_file()
+        assert accompaniment is not None and accompaniment.is_file()
+        destination.write_bytes(b"fake-m4a")
+        return destination
+
+
+def _engines(
+    *, peak: float | None = -6.0, synthesizer: _FakeSynthesizer | None = None
+) -> DubbingEngines:
+    return DubbingEngines(
+        separator=_FakeSeparator(),
+        synthesizer=synthesizer or _FakeSynthesizer(),
+        renderer=WavTimelineRenderer(),
+        mixer=_FakeMixer(),
+        peak_meter=lambda _path: peak,
+    )
+
+
+def _full_context(config: AppConfig, repo: object, job: JobRecord) -> StageContext:
+    return StageContext(
+        config=config,
+        repository=repo,  # type: ignore[arg-type]
+        job=job,
+        probe=_FakeProbe(),
+        extractor=_FakeExtractor(),  # type: ignore[arg-type]
+        transcriber=_SpeakingTranscriber(),  # type: ignore[arg-type]
+        translator=_FakeTranslator(),  # type: ignore[arg-type]
+        renderer=None,  # type: ignore[arg-type]
+    )
+
+
+def _queued_job(config: AppConfig, media_root: Path) -> tuple[object, JobRecord]:
+    video = media_root / "episode.mkv"
+    video.write_bytes(b"media-bytes")
+    repo = open_repository(config)
+    queued = enqueue_dubbing(config, repo, video, require_stability=False, probe=_FakeProbe())
+    return repo, queued.job
+
+
+def test_dubbing_runs_every_stage_and_stages_the_bundle(
+    config: AppConfig, media_root: Path
+) -> None:
+    from nas_subtitles.dubbing import run_dubbing_job
+
+    repo, job = _queued_job(config, media_root)
+    result = run_dubbing_job(_full_context(config, repo, job), engines=_engines())  # type: ignore[arg-type]
+    segments = repo.list_dub_segments(job_id=job.id)  # type: ignore[attr-defined]
+    stored = repo.require_job(job.id)  # type: ignore[attr-defined]
+    repo.close()  # type: ignore[attr-defined]
+
+    assert result.state is JobState.READY_TO_PUBLISH
+    assert result.last_stage is PipelineStage.PUBLISH
+    assert stored.output_path == result.output_path
+    assert [segment.adapted_text for segment in segments] == ["Olá mundo."]
+    bundle = result.output_path
+    assert bundle is not None
+    names = {path.name for path in bundle.iterdir()}
+    assert names == {
+        "dialogue.pt-BR.wav",
+        "dubbed.pt-BR.m4a",
+        "dubbing-plan.json",
+        "manifest.json",
+        "quality-report.json",
+    }
+    manifest = json.loads((bundle / "manifest.json").read_text(encoding="utf-8"))
+    assert manifest["voice_kind"] == "fixed"
+    assert manifest["synthesized_segments"] == 1
+    assert str(bundle) not in json.dumps(manifest)
+
+
+def test_dubbing_clipping_sends_the_job_to_review(config: AppConfig, media_root: Path) -> None:
+    from nas_subtitles.dubbing import run_dubbing_job
+
+    repo, job = _queued_job(config, media_root)
+    result = run_dubbing_job(
+        _full_context(config, repo, job),  # type: ignore[arg-type]
+        engines=_engines(peak=-0.2),
+    )
+    repo.close()  # type: ignore[attr-defined]
+
+    assert result.state is JobState.NEEDS_REVIEW
+    assert [flag.code.value for flag in result.quality.flags] == ["clipping_detected"]
+
+
+def test_dubbing_uses_an_edited_plan_instead_of_regenerating_it(
+    config: AppConfig, media_root: Path
+) -> None:
+    from nas_subtitles.dubbing import run_dubbing_job
+
+    repo, job = _queued_job(config, media_root)
+    repo.replace_dub_plan(  # type: ignore[attr-defined]
+        job_id=job.id,
+        revision=1,
+        segments=[DubSegment("manual", job.id, 1, 0.2, 1.5, "x", "y", "Texto editado à mão.")],
+    )
+    synthesizer = _FakeSynthesizer()
+    run_dubbing_job(
+        _full_context(config, repo, job),  # type: ignore[arg-type]
+        engines=_engines(synthesizer=synthesizer),
+    )
+    repo.close()  # type: ignore[attr-defined]
+
+    assert synthesizer.texts == ["Texto editado à mão."]
+
+
+def test_dubbing_never_overwrites_an_existing_staging_bundle(
+    config: AppConfig, media_root: Path
+) -> None:
+    from nas_subtitles.dubbing import run_dubbing_job
+
+    repo, job = _queued_job(config, media_root)
+    stale = config.output_dir / job.root_id / "dubbing" / job.id
+    stale.mkdir(parents=True)
+    (stale / "dubbed.pt-BR.m4a").write_bytes(b"older bundle")
+    with pytest.raises(NasSubtitlesError) as excinfo:
+        run_dubbing_job(_full_context(config, repo, job), engines=_engines())
+    repo.close()  # type: ignore[attr-defined]
+
+    assert excinfo.value.code is ErrorCode.OUTPUT_CONFLICT
+    assert (stale / "dubbed.pt-BR.m4a").read_bytes() == b"older bundle"
+
+
+def test_dubbing_can_stop_after_synthesize_without_a_mixer(
+    config: AppConfig, media_root: Path
+) -> None:
+    from nas_subtitles.dubbing import run_dubbing_job
+
+    repo, job = _queued_job(config, media_root)
+    result = run_dubbing_job(
+        _full_context(config, repo, job),  # type: ignore[arg-type]
+        stop_after=PipelineStage.SYNTHESIZE,
+        engines=_engines(),
+    )
+    repo.close()  # type: ignore[attr-defined]
+
+    assert result.last_stage is PipelineStage.SYNTHESIZE
+    assert result.state is JobState.RUNNING
+
+
+@pytest.mark.skipif(shutil.which("ffmpeg") is None, reason="needs ffmpeg")
+def test_fit_takes_speeds_up_overruns_and_flags_the_speed_limit(
+    config: AppConfig, tmp_path: Path
+) -> None:
+    take_path = tmp_path / "take.wav"
+    _write_test_wav(take_path, seconds=1.0, rate=22_050)
+    segment = DubSegment("s1", "job", 1, 0.0, 0.5, adapted_text="x")
+    take = SynthesisArtifact("job", "s1", 1, take_path, 1.0, "id", "0" * 64)
+    flags: list[object] = []
+
+    fitted = _fit_takes(config, [segment], {"s1": take}, work=tmp_path / "synced", flags=flags)  # type: ignore[arg-type]
+
+    assert fitted["s1"].duration_seconds == pytest.approx(1.0 / 1.15, abs=0.05)
+    assert [flag.code.value for flag in flags] == ["speed_limit_exceeded"]  # type: ignore[attr-defined]

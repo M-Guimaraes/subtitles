@@ -18,7 +18,7 @@ arquivo/linha foram conferidas na árvore atual; releia-as se o código mudar.
 | Estágio `probe` (seleciona faixa de áudio) | **Sim** | `run_dubbing_job` em [`dubbing.py`](../../src/nas_subtitles/dubbing.py) |
 | Estágio `detect_language` | **Sim** | mesmo `run_dubbing_job` — reusa `language.py`'s `decide_source_language`/`effective_source_override`/`is_supported_source` (funções públicas, nunca os helpers privados de `pipeline.py`) mais um `_dub_language_samples` local; grava evento `language_decision`; mesmos desfechos de legenda (confiante → segue, baixa confiança → `needs_review`, idioma não suportado → `failed`). |
 | Estágio `extract` | **Sim** | mesmo `run_dubbing_job` — planeja os chunks com `media.plan_chunks` (mesma função pública que a legenda usa) e chama `context.extractor.extract` por chunk. Nenhum checkpoint próprio ainda (mesma convenção da legenda: extração é barata e refeita a cada corrida, só a transcrição é que será cacheada quando existir). |
-| Qualquer estágio depois de `extract` (`separate`, `transcribe`, `translate`, `adapt`, `synthesize`, `sync`, `mix`, `validate_audio`, `publish`) | **Não** | mesmo `run_dubbing_job`: levanta `NasSubtitlesError(code=NOT_IMPLEMENTED, detail={"stage": "separate"})` para qualquer estágio a partir daqui |
+| `separate` → `publish` (fase 3, voz fixa) | **Sim** | `run_dubbing_job` → `_run_audio_stages`: Demucs separa, `transcribe`/`merge`/`translate` reaproveitam as funções públicas de `transcription.py`/`translation.py`, `adapt` grava (ou reaproveita, se o usuário editou) o plano em `dub_segments`, Piper sintetiza, `sync` acelera takes que estouram o slot até `max_speed` (nunca desacelera), `WavTimelineRenderer` posiciona, `FfmpegAudioMixer` mixa com o fundo, `validate_audio` mede true peak (ffmpeg `ebur128`) e `publish` grava só em staging (`output_dir/<root>/dubbing/<job_id>/`, escrita exclusiva). Engines entram por `DubbingEngines` (fakes nos testes) |
 | Checkpoint/retomada de dublagem (`start_stage` além de `probe`) | **Não** | nada persiste a decisão de idioma nem os chunks extraídos para um dub job ainda (diferente do que já existe para legenda); listado como fase 4 abaixo |
 | Instalação de modelos TTS/separação (`nas-subs models install`) | **Sim** | `models.py`'s `_install_piper`/`_install_demucs` baixam a voz Piper `pt_BR-faber-medium` (via `piper.download_voices.download_voice`) e o modelo de separação Demucs `htdemucs` (via `demucs.pretrained.get_model`, cache HF isolado em `separation_models_dir`), gravados no mesmo `models.json` que Whisper/Argos. `verify_models` carrega os dois 100% offline (`PiperVoice.load` / `get_model` com `HF_HUB_OFFLINE=1`) em vez de só checar presença em disco. O checksum do Demucs é calculado sobre os tensores do modelo carregado, não sobre o diretório de cache do HF — esse cache materializa blobs compartilhados (Xet) de forma preguiçosa e instável entre execuções, o que tornava o hash do diretório não-reprodutível |
 | `doctor` reconhecendo um perfil de dublagem | **Sim** | `cli.py`'s check `dubbing` agora usa `models.piper_voice_path`/`models.separation_model_path` e falha nomeando qual dos dois está faltando |
@@ -34,7 +34,7 @@ em `separate`, que é onde a decisão de backend da fase 2 (benchmark) deixa
 de ser adiável — `separate` não dá pra escrever sem escolher (ou pelo menos
 fingir) um `DialogueSeparator`.
 
-A fase 2 (seção 4 abaixo) começou: a tarefa 1 (`models install` baixando
+A fase 3 está implementada de ponta a ponta com voz fixa; ver o fim desta seção. A fase 2 (seção 4 abaixo) começou: a tarefa 1 (`models install` baixando
 Piper + Demucs) está feita e testada, com download real validado nesta
 máquina (rede autorizada explicitamente pelo usuário). A decisão de backend
 de separação ficou registrada aqui mesmo: **Demucs (`htdemucs`)** como
@@ -193,3 +193,15 @@ min no seu Mac, e registrar os números. Isso não produz dublagem completa
 ainda, mas é o primeiro passo que **toca rede** — por isso preciso da sua
 confirmação explícita antes de rodar `nas-subs models install` com os
 pacotes novos.
+
+### Estado da fase 3 (medido, não prometido)
+
+Um preview real de 150 s (`nas-subs dub process --preview-seconds 150`, Dexter
+S03E01) rodou ponta a ponta em 62 s e terminou em `needs_review`, gerando os
+cinco arquivos do bundle. O motivo é o estágio `adapt`: hoje ele só copia a
+tradução, sem encurtar. O português fica mais longo que o inglês: 27 de 48
+segmentos pediram mais aceleração que `max_speed` (`speed_limit_exceeded`), 16
+takes invadem o segmento seguinte (`overlap_unresolved`) e o pico ficou em
++0,1 dBTP (`clipping_detected`). Faltam: adaptação de texto ao tempo do slot,
+limitador/normalização na mixagem, persistência dos `synthesis_artifacts` no
+repositório (hoje só em disco) e a avaliação auditiva humana.

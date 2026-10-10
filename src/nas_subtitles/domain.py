@@ -1341,9 +1341,12 @@ class TimelineRenderer(Protocol):
         self,
         *,
         artifacts: Sequence[SynthesisArtifact],
+        starts_seconds: Mapping[str, Seconds],
         duration_seconds: Seconds,
         destination: Path,
-    ) -> Path: ...
+    ) -> Path:
+        """``starts_seconds`` maps ``segment_id`` to its absolute start on the video."""
+        ...
 
 
 @runtime_checkable
