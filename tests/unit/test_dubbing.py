@@ -523,3 +523,101 @@ def test_unknown_profile_is_config_invalid() -> None:
         parse_dubbing_profile("gpu-dream")
     assert raised.value.code is ErrorCode.CONFIG_INVALID
     assert parse_dubbing_profile("cpu-fixed") is DubbingProfile.CPU_FIXED
+
+
+def _write_test_wav(path: Path, *, seconds: float = 1.0, rate: int = 16_000) -> None:
+    import wave
+
+    with wave.open(str(path), "wb") as writer:
+        writer.setnchannels(1)
+        writer.setsampwidth(2)
+        writer.setframerate(rate)
+        writer.writeframes(b"\x10\x10" * int(seconds * rate))
+
+
+def test_demucs_separator_splits_vocals_from_the_rest(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import types
+    import wave
+
+    import torch
+
+    from nas_subtitles.domain import AudioChunkSpec
+    from nas_subtitles.dubbing import DemucsSeparator
+
+    fake_model = types.SimpleNamespace(
+        samplerate=16_000, audio_channels=2, sources=["drums", "vocals"], eval=lambda: None
+    )
+    seen: dict[str, object] = {}
+
+    def fake_apply(model: object, mix: object, **kwargs: object) -> object:
+        seen["kwargs"] = kwargs
+        batch = mix  # (1, channels, samples)
+        return torch.stack([batch[0] * 0.25, batch[0] * 0.75])[None].reshape(1, 2, 2, -1)
+
+    monkeypatch.setattr("nas_subtitles.dubbing.load_separation_model", lambda config: fake_model)
+    monkeypatch.setattr("demucs.apply.apply_model", fake_apply)
+    source = tmp_path / "chunk.wav"
+    _write_test_wav(source)
+    identity = ModelIdentity(kind=ModelKind.SEPARATION, name="htdemucs", path=tmp_path)
+    separator = DemucsSeparator(None, model_identity=identity)  # type: ignore[arg-type]
+    spec = AudioChunkSpec(3, 0.0, 1.0, 0.0, 1.0)
+
+    result = separator.separate(AudioChunk(spec, source), destination_dir=tmp_path / "out")
+
+    assert result.dialogue_path.name == "dialogue-0003.wav"
+    assert result.accompaniment_path is not None
+    assert result.accompaniment_path.name == "accompaniment-0003.wav"
+    assert result.model_identity == identity
+    assert seen["kwargs"]["device"] == "cpu"  # type: ignore[index]
+    with wave.open(str(result.dialogue_path), "rb") as reader:
+        assert (reader.getnchannels(), reader.getframerate(), reader.getnframes()) == (
+            1,
+            16_000,
+            16_000,
+        )
+
+
+def test_piper_synthesizer_writes_a_wav_and_describes_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import wave
+
+    from nas_subtitles.domain import DubSegment, VoiceAssignment
+    from nas_subtitles.dubbing import PiperSynthesizer
+
+    class FakeVoice:
+        def synthesize_wav(self, text: str, writer: wave.Wave_write) -> None:
+            writer.setnchannels(1)
+            writer.setsampwidth(2)
+            writer.setframerate(22_050)
+            writer.writeframes(b"\x00\x00" * 22_050)
+
+    monkeypatch.setattr("nas_subtitles.dubbing.load_tts_voice", lambda config: FakeVoice())
+    identity = ModelIdentity(kind=ModelKind.TTS, name="pt_BR-faber-medium", path=tmp_path)
+    synthesizer = PiperSynthesizer(None, model_identity=identity)  # type: ignore[arg-type]
+    segment = DubSegment("s1", "job-1", 2, 0.0, 1.0, translated_text="Olá.")
+    voice = VoiceAssignment("spk", "pt_BR-faber-medium")
+
+    artifact = synthesizer.synthesize(segment, voice=voice, destination=tmp_path / "s1.wav")
+
+    assert artifact.duration_seconds == pytest.approx(1.0)
+    assert artifact.revision == 2
+    assert artifact.model_identity == identity.identity_token()
+    assert len(artifact.sha256) == 64
+
+    with pytest.raises(NasSubtitlesError) as wrong_voice:
+        synthesizer.synthesize(
+            segment,
+            voice=VoiceAssignment("spk", "other-voice"),
+            destination=tmp_path / "x.wav",
+        )
+    assert wrong_voice.value.code is ErrorCode.MODEL_MISSING
+    with pytest.raises(NasSubtitlesError) as empty:
+        synthesizer.synthesize(
+            DubSegment("s2", "job-1", 1, 0.0, 1.0),
+            voice=voice,
+            destination=tmp_path / "y.wav",
+        )
+    assert empty.value.code is ErrorCode.EMPTY_TRANSLATION

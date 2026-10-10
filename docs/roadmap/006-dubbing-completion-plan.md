@@ -38,9 +38,11 @@ A fase 2 (seção 4 abaixo) começou: a tarefa 1 (`models install` baixando
 Piper + Demucs) está feita e testada, com download real validado nesta
 máquina (rede autorizada explicitamente pelo usuário). A decisão de backend
 de separação ficou registrada aqui mesmo: **Demucs (`htdemucs`)** como
-baseline, conforme a spec original já admitia. As tarefas 2-4 (implementar
-`DialogueSeparator`/`SpeechSynthesizer` de verdade e rodar o benchmark de
-2-5 min com números de tempo/memória) ainda não começaram.
+baseline, conforme a spec original já admitia. As tarefas 2-3 estão feitas
+(`DemucsSeparator`/`PiperSynthesizer` em `dubbing.py`, testados com modelos
+falsos) e a 4 tem uma medição de 3 min em `docs/benchmark.md` (sem avaliação
+auditiva humana ainda). Os engines ainda não estão ligados em
+`run_dubbing_job`: `separate` continua `not_implemented`.
 
 ## 2. A dependência que bloqueia tudo: modelos
 

@@ -37,6 +37,8 @@ __all__ = [
     "configure_argos_environment",
     "configure_stanza_offline",
     "install_models",
+    "load_separation_model",
+    "load_tts_voice",
     "piper_voice_path",
     "read_model_manifest",
     "separation_model_path",
@@ -654,6 +656,29 @@ def _load_whisper_offline(config: AppConfig, model_path: Path) -> None:
             code=ErrorCode.MODEL_MISSING,
             detail={"path_token": path_token(model_path)},
         ) from exc
+
+
+def load_tts_voice(config: AppConfig) -> Any:
+    """Load the installed Piper voice from disk, never from the network."""
+    from piper import PiperVoice
+
+    voice_dir = piper_voice_path(config)
+    name = voice_dir.name
+    try:
+        return PiperVoice.load(
+            voice_dir / f"{name}.onnx", config_path=voice_dir / f"{name}.onnx.json"
+        )
+    except Exception as exc:
+        raise NasSubtitlesError(
+            "Piper voice could not be loaded from the local path; run `nas-subs models install`",
+            code=ErrorCode.MODEL_MISSING,
+            detail={"path_token": path_token(voice_dir)},
+        ) from exc
+
+
+def load_separation_model(config: AppConfig) -> Any:
+    """Load the installed Demucs bag with the hub forced offline."""
+    return _load_demucs_offline(config, separation_model_path(config))
 
 
 def _install_piper(config: AppConfig) -> ModelIdentity:

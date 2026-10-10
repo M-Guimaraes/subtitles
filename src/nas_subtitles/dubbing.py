@@ -8,15 +8,17 @@ never prevents a dubbing job.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import os
 import uuid
+import wave
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from .config import AppConfig
 from .discovery import compute_fingerprint, is_stable, observe, resolve_explicit_path
@@ -36,10 +38,14 @@ from .domain import (
     JobState,
     LanguageDecision,
     MediaProbe,
+    ModelIdentity,
     NasSubtitlesError,
     PipelineStage,
     QualityReport,
     Seconds,
+    SeparatedAudio,
+    SynthesisArtifact,
+    VoiceAssignment,
     infer_job_kind,
     stage_window,
     stages_for,
@@ -47,6 +53,7 @@ from .domain import (
 from .language import decide_source_language, effective_source_override, is_supported_source
 from .logging_setup import log_event, path_token
 from .media import FfprobeMediaProbe, ensure_free_space, plan_chunks, select_audio_stream
+from .models import load_separation_model, load_tts_voice
 
 if TYPE_CHECKING:
     from .pipeline import PipelineResult, StageContext
@@ -54,7 +61,9 @@ if TYPE_CHECKING:
 _LOG = logging.getLogger(__name__)
 
 __all__ = [
+    "DemucsSeparator",
     "DubEnqueueResult",
+    "PiperSynthesizer",
     "apply_plan",
     "enqueue_dubbing",
     "export_plan",
@@ -635,3 +644,166 @@ def _write_exclusive_json(destination: Path, payload: Mapping[str, object]) -> P
     finally:
         tmp.unlink(missing_ok=True)
     return destination
+
+
+# --------------------------------------------------------------------------- #
+# Local engines (roadmap 006 fase 2). Models load lazily and only from disk.
+# --------------------------------------------------------------------------- #
+
+
+def _read_pcm16(path: Path) -> tuple[Any, int]:
+    """Read a 16-bit PCM WAV as a float tensor shaped (channels, samples)."""
+    import torch
+
+    with wave.open(str(path), "rb") as reader:
+        if reader.getsampwidth() != 2:
+            raise NasSubtitlesError("expected 16-bit PCM audio", code=ErrorCode.INVALID_MEDIA)
+        rate = reader.getframerate()
+        channels = reader.getnchannels()
+        raw = reader.readframes(reader.getnframes())
+    samples = torch.frombuffer(bytearray(raw), dtype=torch.int16).float() / 32768.0
+    return samples.view(-1, channels).t().contiguous(), rate
+
+
+def _write_pcm16(path: Path, audio: Any, rate: int) -> str:
+    """Write a (channels, samples) float tensor atomically; return its sha256."""
+    import torch
+
+    clipped = torch.clamp(audio, -1.0, 1.0)
+    pcm = (clipped * 32767.0).round().to(torch.int16).t().contiguous()
+    temporary = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
+    with wave.open(str(temporary), "wb") as writer:
+        writer.setnchannels(int(audio.shape[0]))
+        writer.setsampwidth(2)
+        writer.setframerate(rate)
+        writer.writeframes(pcm.numpy().tobytes())
+    temporary.replace(path)
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+class DemucsSeparator:
+    """``DialogueSeparator`` over the installed Demucs ``htdemucs`` bag.
+
+    Dialogue is the ``vocals`` stem; the accompaniment is every other stem
+    summed. Music separation is not cinematic-effects separation: effects and
+    room tone may leak into either stem. Output keeps the chunk's sample rate
+    and channel count, so accompaniment extracted as 16 kHz mono stays that.
+    """
+
+    def __init__(self, config: AppConfig, *, model_identity: ModelIdentity) -> None:
+        self._config = config
+        self._identity = model_identity
+        self._model: Any = None
+
+    @property
+    def model_identity(self) -> ModelIdentity:
+        return self._identity
+
+    def _loaded(self) -> Any:
+        if self._model is None:
+            self._model = load_separation_model(self._config)
+            self._model.eval()
+        return self._model
+
+    def separate(self, chunk: AudioChunk, *, destination_dir: Path) -> SeparatedAudio:
+        import torch
+        from demucs.apply import apply_model
+        from julius.resample import resample_frac
+
+        model = self._loaded()
+        audio, rate = _read_pcm16(chunk.path)
+        channels = int(audio.shape[0])
+        if rate != model.samplerate:
+            audio = resample_frac(audio, rate, model.samplerate)
+        if audio.shape[0] != model.audio_channels:
+            audio = audio.mean(dim=0, keepdim=True).repeat(model.audio_channels, 1)
+        reference = audio.mean(dim=0)
+        mean = reference.mean()
+        std = reference.std()
+        if not bool(std > 1e-8):
+            std = torch.ones(())
+        with torch.no_grad():
+            stems = apply_model(
+                model,
+                ((audio - mean) / std)[None],
+                device="cpu",
+                split=True,
+                overlap=0.25,
+                progress=False,
+            )[0]
+        stems = stems * std + mean
+        vocals = stems[list(model.sources).index("vocals")]
+        accompaniment = stems.sum(dim=0) - vocals
+
+        def finish(stem: Any) -> Any:
+            if rate != model.samplerate:
+                stem = resample_frac(stem, model.samplerate, rate)
+            return stem.mean(dim=0, keepdim=True).repeat(channels, 1)
+
+        destination_dir.mkdir(parents=True, exist_ok=True)
+        index = chunk.spec.index
+        dialogue_path = destination_dir / f"dialogue-{index:04d}.wav"
+        accompaniment_path = destination_dir / f"accompaniment-{index:04d}.wav"
+        digest = _write_pcm16(dialogue_path, finish(vocals), rate)
+        _write_pcm16(accompaniment_path, finish(accompaniment), rate)
+        return SeparatedAudio(
+            chunk=chunk.spec,
+            dialogue_path=dialogue_path,
+            accompaniment_path=accompaniment_path,
+            sha256=digest,
+            model_identity=self._identity,
+        )
+
+
+class PiperSynthesizer:
+    """``SpeechSynthesizer`` over the installed Piper voice (fixed voice only)."""
+
+    def __init__(self, config: AppConfig, *, model_identity: ModelIdentity) -> None:
+        self._config = config
+        self._identity = model_identity
+        self._voice: Any = None
+
+    @property
+    def model_identity(self) -> ModelIdentity:
+        return self._identity
+
+    def _loaded(self) -> Any:
+        if self._voice is None:
+            self._voice = load_tts_voice(self._config)
+        return self._voice
+
+    def synthesize(
+        self,
+        segment: DubSegment,
+        *,
+        voice: VoiceAssignment,
+        destination: Path,
+    ) -> SynthesisArtifact:
+        if voice.voice_id != self._identity.name:
+            raise NasSubtitlesError(
+                f"voice {voice.voice_id} is not the installed voice {self._identity.name}",
+                code=ErrorCode.MODEL_MISSING,
+            )
+        text = (segment.adapted_text or segment.translated_text).strip()
+        if not text:
+            raise NasSubtitlesError(
+                f"segment {segment.segment_id} has no text to synthesize",
+                code=ErrorCode.EMPTY_TRANSLATION,
+            )
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        temporary = destination.with_name(f".{destination.name}.{uuid.uuid4().hex}.tmp")
+        with wave.open(str(temporary), "wb") as writer:
+            self._loaded().synthesize_wav(text, writer)
+        with wave.open(str(temporary), "rb") as reader:
+            duration = reader.getnframes() / float(reader.getframerate())
+        temporary.replace(destination)
+        return SynthesisArtifact(
+            job_id=segment.job_id,
+            segment_id=segment.segment_id,
+            revision=segment.revision,
+            path=destination,
+            duration_seconds=duration,
+            model_identity=self._identity.identity_token(),
+            sha256=hashlib.sha256(destination.read_bytes()).hexdigest(),
+            seed=None,
+        )
