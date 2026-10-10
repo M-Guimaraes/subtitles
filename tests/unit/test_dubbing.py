@@ -17,6 +17,7 @@ from nas_subtitles.discovery import enqueue_targets, observe, scan
 from nas_subtitles.domain import (
     DB_SCHEMA_VERSION,
     DUBBING_PLAN_SCHEMA_VERSION,
+    AudioChunk,
     AudioStreamInfo,
     DubbingProfile,
     DubSegment,
@@ -26,7 +27,12 @@ from nas_subtitles.domain import (
     JobKind,
     JobRecord,
     JobState,
+    LanguageDecision,
+    LanguageSample,
+    LanguageSource,
     MediaFingerprint,
+    ModelIdentity,
+    ModelKind,
     NasSubtitlesError,
     PipelineStage,
     ProbeResult,
@@ -60,6 +66,64 @@ class _FakeProbe:
 
 def _fast(config: AppConfig) -> AppConfig:
     return config.model_copy(update={"stability_window_seconds": 60, "minimum_file_age_seconds": 0})
+
+
+class _FakeExtractor:
+    def extract(
+        self, *, source: Path, stream_index: int, spec: object, destination: Path
+    ) -> AudioChunk:
+        del source, stream_index
+        return AudioChunk(spec=spec, path=destination)  # type: ignore[arg-type]
+
+
+class _FakeDubTranscriber:
+    """Only ``detect_language`` is exercised: nothing past it is implemented."""
+
+    def __init__(self, *, language: str = "en", probability: float = 0.95) -> None:
+        self.language = language
+        self.probability = probability
+
+    @property
+    def model_identity(self) -> ModelIdentity:
+        return ModelIdentity(kind=ModelKind.ASR, name="fake", path=Path("/models/fake"))
+
+    def detect_language(self, samples: object) -> LanguageDecision:
+        collected = tuple(
+            LanguageSample(
+                offset_seconds=chunk.spec.extract_start_seconds,
+                duration_seconds=chunk.spec.extract_duration_seconds,
+                language=self.language,
+                probability=self.probability,
+                has_speech=self.probability >= 0.15,
+            )
+            for chunk in samples  # type: ignore[attr-defined]
+        )
+        confident = self.probability >= 0.80
+        return LanguageDecision(
+            language=self.language if confident else None,
+            source=LanguageSource.DETECTION,
+            confident=confident,
+            probability=self.probability,
+            samples=collected,
+        )
+
+    def transcribe(self, chunk: object, *, language: str) -> object:
+        raise AssertionError("transcribe must not run: roadmap 006 stops at detect_language")
+
+
+def _dub_context(
+    config: AppConfig, repo: object, job: JobRecord, *, transcriber: object | None = None
+) -> StageContext:
+    return StageContext(
+        config=config,
+        repository=repo,  # type: ignore[arg-type]
+        job=job,
+        probe=_FakeProbe(),
+        extractor=_FakeExtractor(),  # type: ignore[arg-type]
+        transcriber=transcriber or _FakeDubTranscriber(),  # type: ignore[arg-type]
+        translator=None,  # type: ignore[arg-type]
+        renderer=None,  # type: ignore[arg-type]
+    )
 
 
 def test_schema_version_is_four_after_migrate(config: AppConfig) -> None:
@@ -295,6 +359,72 @@ def test_dubbing_process_stop_after_probe_does_not_require_engines(
     assert result.last_stage is PipelineStage.PROBE
     assert stored.state is JobState.RUNNING
     assert stored.job_kind is JobKind.DUBBING
+
+
+def test_dubbing_detect_language_confident_stops_there_when_asked(
+    config: AppConfig, media_root: Path
+) -> None:
+    video = media_root / "episode.mkv"
+    video.write_bytes(b"media-bytes")
+    repo = open_repository(config)
+    queued = enqueue_dubbing(config, repo, video, require_stability=False, probe=_FakeProbe())
+    transcriber = _FakeDubTranscriber(language="en", probability=0.93)
+    context = _dub_context(config, repo, queued.job, transcriber=transcriber)
+    result = run_job(context, stop_after=PipelineStage.DETECT_LANGUAGE)
+    stored = repo.require_job(queued.job.id)
+    events = repo.list_events(job_id=queued.job.id)
+    repo.close()
+    assert result.last_stage is PipelineStage.DETECT_LANGUAGE
+    assert stored.state is JobState.RUNNING
+    assert [event.code for event in events] == ["language_decision"]
+    assert events[0].payload["detected_language"] == "en"
+    assert events[0].payload["confident"] is True
+
+
+def test_dubbing_low_confidence_goes_to_needs_review(config: AppConfig, media_root: Path) -> None:
+    video = media_root / "episode.mkv"
+    video.write_bytes(b"media-bytes")
+    repo = open_repository(config)
+    queued = enqueue_dubbing(config, repo, video, require_stability=False, probe=_FakeProbe())
+    transcriber = _FakeDubTranscriber(language="en", probability=0.2)
+    context = _dub_context(config, repo, queued.job, transcriber=transcriber)
+    result = run_job(context)
+    stored = repo.require_job(queued.job.id)
+    repo.close()
+    assert result.state is JobState.NEEDS_REVIEW
+    assert result.last_stage is PipelineStage.DETECT_LANGUAGE
+    assert stored.error_code is ErrorCode.LANGUAGE_UNDETERMINED
+
+
+def test_dubbing_unsupported_language_fails(config: AppConfig, media_root: Path) -> None:
+    video = media_root / "episode.mkv"
+    video.write_bytes(b"media-bytes")
+    repo = open_repository(config)
+    queued = enqueue_dubbing(
+        config, repo, video, require_stability=False, probe=_FakeProbe(), source_language="ja"
+    )
+    context = _dub_context(config, repo, queued.job)
+    result = run_job(context)
+    stored = repo.require_job(queued.job.id)
+    repo.close()
+    assert result.state is JobState.FAILED
+    assert result.last_stage is PipelineStage.DETECT_LANGUAGE
+    assert stored.error_code is ErrorCode.UNSUPPORTED_LANGUAGE
+
+
+def test_dubbing_beyond_detect_language_is_still_not_implemented(
+    config: AppConfig, media_root: Path
+) -> None:
+    video = media_root / "episode.mkv"
+    video.write_bytes(b"media-bytes")
+    repo = open_repository(config)
+    queued = enqueue_dubbing(config, repo, video, require_stability=False, probe=_FakeProbe())
+    context = _dub_context(config, repo, queued.job)
+    with pytest.raises(NasSubtitlesError) as excinfo:
+        run_job(context)
+    repo.close()
+    assert excinfo.value.code is ErrorCode.NOT_IMPLEMENTED
+    assert excinfo.value.detail == {"stage": "extract"}
 
 
 def test_cli_dub_enqueue_json(config: AppConfig, media_root: Path, config_path: Path) -> None:

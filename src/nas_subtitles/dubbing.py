@@ -13,7 +13,7 @@ import logging
 import os
 import uuid
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -22,14 +22,19 @@ from .config import AppConfig
 from .discovery import compute_fingerprint, is_stable, observe, resolve_explicit_path
 from .domain import (
     DUBBING_PLAN_SCHEMA_VERSION,
+    AudioChunk,
+    AudioStreamInfo,
     DubbingProfile,
     DubSegment,
     DubSegmentReviewState,
     ErrorCode,
+    EventLevel,
+    JobEvent,
     JobKind,
     JobRecord,
     JobRepository,
     JobState,
+    LanguageDecision,
     MediaProbe,
     NasSubtitlesError,
     PipelineStage,
@@ -39,8 +44,9 @@ from .domain import (
     stage_window,
     stages_for,
 )
+from .language import decide_source_language, effective_source_override, is_supported_source
 from .logging_setup import log_event, path_token
-from .media import FfprobeMediaProbe, ensure_free_space, select_audio_stream
+from .media import FfprobeMediaProbe, ensure_free_space, plan_chunks, select_audio_stream
 
 if TYPE_CHECKING:
     from .pipeline import PipelineResult, StageContext
@@ -239,7 +245,17 @@ def run_dubbing_job(
     start_stage: PipelineStage | None = None,
     stop_after: PipelineStage | None = None,
 ) -> PipelineResult:
-    """Run the dubbing stage window. Engines after probe arrive in later phases."""
+    """Run the dubbing stage window.
+
+    ``probe`` and ``detect_language`` are real: they reuse the same
+    transcriber/extractor the subtitle pipeline uses (never its private
+    helpers — this stays inside roadmap-006 ownership) to pick the audio
+    stream and vote on the source language. Separation, synthesis, sync,
+    mix and publish are still unimplemented Protocol stubs (domain.py), so
+    anything past ``detect_language`` is ``not_implemented``. Resuming from
+    a stage other than ``probe`` is not supported yet (no checkpoint is
+    written here); see docs/roadmap/006-dubbing-completion-plan.md fase 4.
+    """
 
     from .pipeline import PipelineResult
 
@@ -268,21 +284,184 @@ def run_dubbing_job(
             code=ErrorCode.MEDIA_ROOT_MISSING,
         )
     video = root.path / job.relative_path
+    target_language = config.target_language_for_job(job.target_language)
+
     job = repo.transition(job_id=job.id, state=JobState.RUNNING, stage=PipelineStage.PROBE)
-    if PipelineStage.PROBE in window:
-        context.probe.probe(video)
-        if window[-1] is PipelineStage.PROBE:
-            return PipelineResult(
-                job_id=job.id,
-                state=job.state,
-                last_stage=PipelineStage.PROBE,
-                quality=QualityReport(),
-            )
-    next_stage = next((stage for stage in window if stage is not PipelineStage.PROBE), None)
+    probe_result = context.probe.probe(video)
+    stream = select_audio_stream(
+        probe_result,
+        override_index=job.audio_stream_index_override,
+        config=config,
+    )
+    duration = probe_result.duration_seconds
+    if job.preview_seconds is not None:
+        offset = job.preview_offset_seconds or 0.0
+        duration = min(duration, offset + job.preview_seconds)
+    fingerprint = compute_fingerprint(root=root, path=video, audio_stream_index=stream.index)
+    if not fingerprint.content_matches(job.fingerprint):
+        raise NasSubtitlesError("media changed before processing", code=ErrorCode.MEDIA_CHANGED)
+    if window[-1] is PipelineStage.PROBE:
+        return PipelineResult(
+            job_id=job.id,
+            state=job.state,
+            last_stage=PipelineStage.PROBE,
+            quality=QualityReport(),
+            media_seconds=duration,
+        )
+
+    job = repo.transition(
+        job_id=job.id, state=JobState.RUNNING, stage=PipelineStage.DETECT_LANGUAGE
+    )
+    override = effective_source_override(config, job_override=job.source_language_override)
+    decision = decide_source_language(
+        config,
+        stream=stream,
+        override=override,
+        transcriber=context.transcriber,
+    )
+    if override is None:
+        samples = _dub_language_samples(
+            context, video=video, stream_index=stream.index, duration=duration
+        )
+        asr_decision = context.transcriber.detect_language(samples)
+        decision = decide_source_language(
+            config,
+            stream=stream,
+            samples=asr_decision.samples,
+            transcriber=context.transcriber,
+        )
+    _record_dub_language_decision(
+        context, stream=stream, decision=decision, target_language=target_language
+    )
+    if not decision.confident or decision.language is None:
+        job = repo.transition(
+            job_id=job.id,
+            state=JobState.NEEDS_REVIEW,
+            error_code=ErrorCode.LANGUAGE_UNDETERMINED,
+            error_detail=decision.reason,
+        )
+        return PipelineResult(
+            job_id=job.id,
+            state=job.state,
+            last_stage=PipelineStage.DETECT_LANGUAGE,
+            quality=QualityReport(),
+            media_seconds=duration,
+        )
+    language = decision.language
+    if not is_supported_source(language):
+        job = repo.transition(
+            job_id=job.id,
+            state=JobState.FAILED,
+            error_code=ErrorCode.UNSUPPORTED_LANGUAGE,
+            error_detail=language,
+        )
+        return PipelineResult(
+            job_id=job.id,
+            state=job.state,
+            last_stage=PipelineStage.DETECT_LANGUAGE,
+            quality=QualityReport(),
+            media_seconds=duration,
+        )
+    if window[-1] is PipelineStage.DETECT_LANGUAGE:
+        return PipelineResult(
+            job_id=job.id,
+            state=job.state,
+            last_stage=PipelineStage.DETECT_LANGUAGE,
+            quality=QualityReport(),
+            media_seconds=duration,
+        )
+
+    next_stage = next(
+        (
+            stage
+            for stage in window
+            if stage not in (PipelineStage.PROBE, PipelineStage.DETECT_LANGUAGE)
+        ),
+        None,
+    )
     raise NasSubtitlesError(
-        "dubbing engines after probe are not implemented yet (roadmap 006)",
+        "dubbing engines after detect_language are not implemented yet (roadmap 006)",
         code=ErrorCode.NOT_IMPLEMENTED,
         detail={"stage": str(next_stage) if next_stage else None},
+    )
+
+
+def _dub_language_samples(
+    context: StageContext, *, video: Path, stream_index: int, duration: Seconds
+) -> tuple[AudioChunk, ...]:
+    """Two 8s samples for language detection.
+
+    Deliberately not imported from ``pipeline.py`` (owned by stage 7):
+    roadmap 006 may only read its public, shared helpers (``plan_chunks``),
+    never a subtitle-pipeline private function. This mirrors that helper's
+    shape exactly so the two stay easy to compare.
+    """
+    offsets = (0.0, max(0.0, duration / 2.0))
+    chunks: list[AudioChunk] = []
+    work = context.config.work_dir / context.job.id / "language"
+    for index, offset in enumerate(offsets):
+        spec = plan_chunks(
+            duration_seconds=min(duration, offset + 8.0),
+            stream_start_seconds=0.0,
+            chunk_seconds=8.0,
+            overlap_seconds=0.0,
+        )
+        if not spec:
+            continue
+        sample_spec = replace(
+            spec[0],
+            index=index,
+            owned_start_seconds=offset,
+            owned_end_seconds=min(duration, offset + 8.0),
+            extract_start_seconds=offset,
+            extract_end_seconds=min(duration, offset + 8.0),
+        )
+        destination = work / f"sample-{index}.wav"
+        chunks.append(
+            context.extractor.extract(
+                source=video, stream_index=stream_index, spec=sample_spec, destination=destination
+            )
+        )
+    return tuple(chunks)
+
+
+def _record_dub_language_decision(
+    context: StageContext,
+    *,
+    stream: AudioStreamInfo,
+    decision: LanguageDecision,
+    target_language: str,
+) -> None:
+    payload: dict[str, object] = {
+        "selected_audio_stream_index": stream.index,
+        "stream_language": stream.language,
+        "detected_language": decision.language,
+        "detection_probability": decision.probability,
+        "source": str(decision.source),
+        "confident": decision.confident,
+        "target_language": target_language,
+        "reason": decision.reason,
+    }
+    context.repository.append_event(
+        JobEvent(
+            level=EventLevel.INFO,
+            code="language_decision",
+            job_id=context.job.id,
+            payload=payload,
+        )
+    )
+    log_event(
+        _LOG,
+        "dubbing language decision",
+        job_id=context.job.id,
+        selected_audio_stream_index=stream.index,
+        stream_language=stream.language,
+        detected_language=decision.language,
+        detection_probability=decision.probability,
+        language_source=str(decision.source),
+        confident=decision.confident,
+        target_language=target_language,
+        reason=decision.reason,
     )
 
 
