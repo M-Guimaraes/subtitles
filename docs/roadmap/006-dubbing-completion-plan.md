@@ -16,19 +16,23 @@ arquivo/linha foram conferidas na árvore atual; releia-as se o código mudar.
 | `nas-subs dub enqueue` / `dub process` | **Sim** | [`dubbing.py:87`](../../src/nas_subtitles/dubbing.py), [`cli.py:617`](../../src/nas_subtitles/cli.py) |
 | `nas-subs dub plan export/apply` (edição manual de falas) | **Sim**, com controle de revisão e rejeição de revisão obsoleta | [`dubbing.py:150-235`](../../src/nas_subtitles/dubbing.py), testado em `test_dubbing.py` |
 | Estágio `probe` (seleciona faixa de áudio) | **Sim** | `run_dubbing_job` em [`dubbing.py`](../../src/nas_subtitles/dubbing.py) |
-| Estágio `detect_language` | **Sim, implementado nesta sessão** | mesmo `run_dubbing_job` — reusa `language.py`'s `decide_source_language`/`effective_source_override`/`is_supported_source` (funções públicas, nunca os helpers privados de `pipeline.py`) mais um `_dub_language_samples` local; grava evento `language_decision`; mesmos desfechos de legenda (confiante → segue, baixa confiança → `needs_review`, idioma não suportado → `failed`). Testado em `test_dubbing.py` (`test_dubbing_detect_language_confident_stops_there_when_asked` e vizinhos), com engines falsas — nenhum modelo real precisou ser instalado para isso. |
-| Qualquer estágio depois de `detect_language` (`extract`, `separate`, `transcribe`, `translate`, `adapt`, `synthesize`, `sync`, `mix`, `validate_audio`, `publish`) | **Não** | mesmo `run_dubbing_job`: levanta `NasSubtitlesError(code=NOT_IMPLEMENTED, detail={"stage": "extract"})` para qualquer estágio a partir daqui |
-| Checkpoint/retomada de dublagem (`start_stage` além de `probe`) | **Não** | nada persiste a decisão de idioma para um dub job ainda (diferente do que já existe para legenda); listado como fase 4 abaixo |
+| Estágio `detect_language` | **Sim** | mesmo `run_dubbing_job` — reusa `language.py`'s `decide_source_language`/`effective_source_override`/`is_supported_source` (funções públicas, nunca os helpers privados de `pipeline.py`) mais um `_dub_language_samples` local; grava evento `language_decision`; mesmos desfechos de legenda (confiante → segue, baixa confiança → `needs_review`, idioma não suportado → `failed`). |
+| Estágio `extract` | **Sim** | mesmo `run_dubbing_job` — planeja os chunks com `media.plan_chunks` (mesma função pública que a legenda usa) e chama `context.extractor.extract` por chunk. Nenhum checkpoint próprio ainda (mesma convenção da legenda: extração é barata e refeita a cada corrida, só a transcrição é que será cacheada quando existir). |
+| Qualquer estágio depois de `extract` (`separate`, `transcribe`, `translate`, `adapt`, `synthesize`, `sync`, `mix`, `validate_audio`, `publish`) | **Não** | mesmo `run_dubbing_job`: levanta `NasSubtitlesError(code=NOT_IMPLEMENTED, detail={"stage": "separate"})` para qualquer estágio a partir daqui |
+| Checkpoint/retomada de dublagem (`start_stage` além de `probe`) | **Não** | nada persiste a decisão de idioma nem os chunks extraídos para um dub job ainda (diferente do que já existe para legenda); listado como fase 4 abaixo |
 | Instalação de modelos TTS/separação (`nas-subs models install`) | **Não** | [`cli.py:370-386`](../../src/nas_subtitles/cli.py) só baixa Whisper + Argos; `models.py:388-389` só confere presença no disco, não instala |
 | `doctor` reconhecendo um perfil de dublagem | **Parcial** | [`cli.py:268-276`](../../src/nas_subtitles/cli.py) só verifica se a pasta da voz Piper existe — nunca a cria |
 
 **Conclusão:** a fase 1 do plano original (contratos, schema, CLI, plano de
-falas editável) está genuinamente completa e testada, e agora o primeiro
-pedaço de orquestração real (`detect_language`) também está — construído com
-engines falsas, sem nenhuma dependência nova. Tudo que produz áudio —
-separação, síntese, sincronização, mixagem — continua só assinatura de
-protocolo, zero implementação. A parede de `not_implemented` (antes logo
-após `probe`) andou um estágio: agora é em `extract`.
+falas editável) está genuinamente completa e testada, e agora os dois
+primeiros pedaços de orquestração real (`detect_language`, `extract`)
+também estão — construídos com engines falsas, sem nenhuma dependência
+nova. Tudo que produz áudio — separação, síntese, sincronização, mixagem —
+continua só assinatura de protocolo, zero implementação. A parede de
+`not_implemented` (antes logo após `probe`) andou dois estágios: agora é
+em `separate`, que é onde a decisão de backend da fase 2 (benchmark) deixa
+de ser adiável — `separate` não dá pra escrever sem escolher (ou pelo menos
+fingir) um `DialogueSeparator`.
 
 ## 2. A dependência que bloqueia tudo: modelos
 

@@ -247,14 +247,15 @@ def run_dubbing_job(
 ) -> PipelineResult:
     """Run the dubbing stage window.
 
-    ``probe`` and ``detect_language`` are real: they reuse the same
-    transcriber/extractor the subtitle pipeline uses (never its private
-    helpers — this stays inside roadmap-006 ownership) to pick the audio
-    stream and vote on the source language. Separation, synthesis, sync,
-    mix and publish are still unimplemented Protocol stubs (domain.py), so
-    anything past ``detect_language`` is ``not_implemented``. Resuming from
-    a stage other than ``probe`` is not supported yet (no checkpoint is
-    written here); see docs/roadmap/006-dubbing-completion-plan.md fase 4.
+    ``probe``, ``detect_language`` and ``extract`` are real: they reuse the
+    same probe/transcriber/extractor the subtitle pipeline uses (never its
+    private helpers — this stays inside roadmap-006 ownership) to pick the
+    audio stream, vote on the source language and cut it into chunks.
+    Separation, synthesis, sync, mix and publish are still unimplemented
+    Protocol stubs (domain.py), so anything past ``extract`` is
+    ``not_implemented``. Resuming from a stage other than ``probe`` is not
+    supported yet (no checkpoint is written here); see
+    docs/roadmap/006-dubbing-completion-plan.md fase 4.
     """
 
     from .pipeline import PipelineResult
@@ -371,19 +372,45 @@ def run_dubbing_job(
             media_seconds=duration,
         )
 
-    next_stage = next(
-        (
-            stage
-            for stage in window
-            if stage not in (PipelineStage.PROBE, PipelineStage.DETECT_LANGUAGE)
-        ),
-        None,
+    job = repo.transition(job_id=job.id, state=JobState.RUNNING, stage=PipelineStage.EXTRACT)
+    specs = plan_chunks(
+        duration_seconds=duration,
+        stream_start_seconds=stream.start_time_seconds,
+        chunk_seconds=float(config.asr.chunk_seconds),
+        overlap_seconds=float(config.asr.overlap_seconds),
     )
+    work = config.work_dir / job.id
+    work.mkdir(parents=True, exist_ok=True)
+    for spec in specs:
+        _check_dub_stop(context)
+        ensure_free_space(config, work)
+        wav = work / f"chunk-{spec.index:04d}.wav"
+        context.extractor.extract(
+            source=video, stream_index=stream.index, spec=spec, destination=wav
+        )
+    if window[-1] is PipelineStage.EXTRACT:
+        return PipelineResult(
+            job_id=job.id,
+            state=job.state,
+            last_stage=PipelineStage.EXTRACT,
+            quality=QualityReport(),
+            media_seconds=duration,
+        )
+
+    excluded = (PipelineStage.PROBE, PipelineStage.DETECT_LANGUAGE, PipelineStage.EXTRACT)
+    next_stage = next((stage for stage in window if stage not in excluded), None)
     raise NasSubtitlesError(
-        "dubbing engines after detect_language are not implemented yet (roadmap 006)",
+        "dubbing engines after extract are not implemented yet (roadmap 006)",
         code=ErrorCode.NOT_IMPLEMENTED,
         detail={"stage": str(next_stage) if next_stage else None},
     )
+
+
+def _check_dub_stop(context: StageContext) -> None:
+    """Local twin of ``pipeline.py``'s private ``_check_stop`` — same reason
+    as ``_dub_language_samples``: never import a subtitle-pipeline internal."""
+    if context.stop_event is not None and context.stop_event.is_set():
+        raise NasSubtitlesError("interrupted by signal", code=ErrorCode.INTERRUPTED)
 
 
 def _dub_language_samples(

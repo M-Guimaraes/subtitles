@@ -69,10 +69,14 @@ def _fast(config: AppConfig) -> AppConfig:
 
 
 class _FakeExtractor:
+    def __init__(self) -> None:
+        self.calls = 0
+
     def extract(
         self, *, source: Path, stream_index: int, spec: object, destination: Path
     ) -> AudioChunk:
         del source, stream_index
+        self.calls += 1
         return AudioChunk(spec=spec, path=destination)  # type: ignore[arg-type]
 
 
@@ -112,14 +116,19 @@ class _FakeDubTranscriber:
 
 
 def _dub_context(
-    config: AppConfig, repo: object, job: JobRecord, *, transcriber: object | None = None
+    config: AppConfig,
+    repo: object,
+    job: JobRecord,
+    *,
+    transcriber: object | None = None,
+    extractor: object | None = None,
 ) -> StageContext:
     return StageContext(
         config=config,
         repository=repo,  # type: ignore[arg-type]
         job=job,
         probe=_FakeProbe(),
-        extractor=_FakeExtractor(),  # type: ignore[arg-type]
+        extractor=extractor or _FakeExtractor(),  # type: ignore[arg-type]
         transcriber=transcriber or _FakeDubTranscriber(),  # type: ignore[arg-type]
         translator=None,  # type: ignore[arg-type]
         renderer=None,  # type: ignore[arg-type]
@@ -412,7 +421,24 @@ def test_dubbing_unsupported_language_fails(config: AppConfig, media_root: Path)
     assert stored.error_code is ErrorCode.UNSUPPORTED_LANGUAGE
 
 
-def test_dubbing_beyond_detect_language_is_still_not_implemented(
+def test_dubbing_extract_stops_there_when_asked(config: AppConfig, media_root: Path) -> None:
+    video = media_root / "episode.mkv"
+    video.write_bytes(b"media-bytes")
+    repo = open_repository(config)
+    queued = enqueue_dubbing(config, repo, video, require_stability=False, probe=_FakeProbe())
+    extractor = _FakeExtractor()
+    context = _dub_context(config, repo, queued.job, extractor=extractor)
+    result = run_job(context, stop_after=PipelineStage.EXTRACT)
+    stored = repo.require_job(queued.job.id)
+    repo.close()
+    assert result.last_stage is PipelineStage.EXTRACT
+    assert stored.state is JobState.RUNNING
+    # 2 language-detection samples (duration=2s -> offsets 0.0 and 1.0) + 1
+    # real chunk (2s fits under the default 300s chunk_seconds).
+    assert extractor.calls == 3
+
+
+def test_dubbing_beyond_extract_is_still_not_implemented(
     config: AppConfig, media_root: Path
 ) -> None:
     video = media_root / "episode.mkv"
@@ -424,7 +450,7 @@ def test_dubbing_beyond_detect_language_is_still_not_implemented(
         run_job(context)
     repo.close()
     assert excinfo.value.code is ErrorCode.NOT_IMPLEMENTED
-    assert excinfo.value.detail == {"stage": "extract"}
+    assert excinfo.value.detail == {"stage": "separate"}
 
 
 def test_cli_dub_enqueue_json(config: AppConfig, media_root: Path, config_path: Path) -> None:
