@@ -40,14 +40,19 @@ function ensureModalHost() {
 function openHost(innerHtml) {
   const host = ensureModalHost();
   host.innerHTML = innerHtml;
-  host.classList.remove("hidden");
+  host.classList.remove("hidden", "show");
+  requestAnimationFrame(() => host.classList.add("show"));
   return host;
 }
 
 function closeHost() {
   if (!modalHost) return;
-  modalHost.classList.add("hidden");
-  modalHost.innerHTML = "";
+  const host = modalHost;
+  host.classList.remove("show");
+  setTimeout(() => {
+    host.classList.add("hidden");
+    host.innerHTML = "";
+  }, 200);
 }
 
 export function confirmDialog({ title, body, confirmLabel = "Confirmar", danger = false }) {

@@ -17,6 +17,18 @@
   --radius-sm: 6px;
   --radius-md: 10px;
   --radius-lg: 14px;
+  --duration-fast: 120ms;
+  --duration-base: 200ms;
+  --ease-out-spring: cubic-bezier(0.22, 1, 0.36, 1);
+  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.3);
+  --shadow-md: 0 10px 24px rgba(0, 0, 0, 0.35);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  :root {
+    --duration-fast: 0ms;
+    --duration-base: 0ms;
+  }
 }
 
 * {
@@ -26,6 +38,7 @@
 body {
   margin: 0;
   font: 14px/1.5 ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  font-optical-sizing: auto;
   background: var(--bg-primary);
   color: var(--text-primary);
 }
@@ -116,6 +129,8 @@ svg {
   border-radius: var(--radius-sm);
   color: var(--text-secondary);
   font-size: 0.9rem;
+  transition: background-color var(--duration-base) ease, color var(--duration-base) ease,
+    transform var(--duration-fast) var(--ease-out-spring);
 }
 
 .side-nav a svg {
@@ -126,6 +141,10 @@ svg {
 .side-nav a:hover {
   background: var(--bg-card);
   color: var(--text-primary);
+}
+
+.side-nav a:active {
+  transform: scale(0.97);
 }
 
 .side-nav a.active {
@@ -200,6 +219,8 @@ main {
 .page-header h1 {
   margin: 0 0 0.2rem;
   font-size: 1.5rem;
+  line-height: 1.2;
+  letter-spacing: -0.01em;
 }
 
 .page-actions {
@@ -219,10 +240,16 @@ main {
   padding: 0.5rem 0.9rem;
   font-size: 0.85rem;
   cursor: pointer;
+  transition: background-color var(--duration-base) ease, border-color var(--duration-base) ease,
+    transform var(--duration-fast) var(--ease-out-spring);
 }
 
 .btn:hover {
   background: var(--bg-card-hover);
+}
+
+.btn:active:not(:disabled) {
+  transform: scale(0.97);
 }
 
 .btn:disabled {
@@ -286,10 +313,19 @@ main {
   border: 1px solid var(--border);
   border-radius: var(--radius-md);
   padding: 0.9rem 1rem;
+  box-shadow: var(--shadow-sm);
+  transition: border-color var(--duration-base) ease, transform var(--duration-fast) var(--ease-out-spring),
+    box-shadow var(--duration-base) ease;
 }
 
 .stat-card:hover {
   border-color: var(--accent);
+  box-shadow: var(--shadow-md);
+  transform: translateY(-1px);
+}
+
+.stat-card:active {
+  transform: translateY(-1px) scale(0.98);
 }
 
 .stat-icon {
@@ -337,6 +373,7 @@ main {
 .stat-value {
   font-size: 1.3rem;
   font-weight: 700;
+  letter-spacing: -0.01em;
 }
 
 .stat-label {
@@ -365,6 +402,7 @@ main {
   border: 1px solid var(--border);
   border-radius: var(--radius-md);
   padding: 1rem 1.1rem;
+  box-shadow: var(--shadow-sm);
 }
 
 .panel h2 {
@@ -415,14 +453,22 @@ details.panel[open] > summary::before {
 .active-job,
 .attention-job {
   display: block;
-  padding: 0.75rem 0;
+  margin: 0 -0.5rem;
+  padding: 0.75rem 0.5rem;
   border-bottom: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  transition: background-color var(--duration-base) ease;
+}
+
+.active-job:hover,
+.attention-job:hover {
+  background: var(--bg-card-hover);
 }
 
 .active-job:last-child,
 .attention-job:last-child {
   border-bottom: none;
-  padding-bottom: 0;
+  padding-bottom: 0.25rem;
 }
 
 .active-job-head,
@@ -449,8 +495,15 @@ details.panel[open] > summary::before {
   display: flex;
   align-items: flex-start;
   gap: 0.6rem;
-  padding: 0.5rem 0;
+  margin: 0 -0.5rem;
+  padding: 0.5rem 0.5rem;
   border-bottom: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  transition: background-color var(--duration-base) ease;
+}
+
+.activity-row:hover {
+  background: var(--bg-card-hover);
 }
 
 .activity-row:last-child {
@@ -630,6 +683,17 @@ a:focus-visible {
   padding: 0.4rem 0.85rem;
   font-size: 0.82rem;
   cursor: pointer;
+  transition: background-color var(--duration-base) ease, color var(--duration-base) ease,
+    border-color var(--duration-base) ease, transform var(--duration-fast) var(--ease-out-spring);
+}
+
+.tab:hover:not(.active) {
+  background: var(--bg-card-hover);
+  color: var(--text-primary);
+}
+
+.tab:active {
+  transform: scale(0.96);
 }
 
 .tab.active {
@@ -677,10 +741,15 @@ th {
 
 tbody tr {
   cursor: pointer;
+  transition: background-color var(--duration-fast) ease;
 }
 
 tbody tr:hover {
   background: var(--bg-card-hover);
+}
+
+tbody tr:active {
+  background: var(--border);
 }
 
 .file-title {
@@ -873,20 +942,22 @@ tbody tr:hover {
 }
 
 .toast {
-  background: var(--bg-card);
+  background: rgba(21, 30, 48, 0.85);
+  backdrop-filter: blur(16px) saturate(160%);
   border: 1px solid var(--border);
   border-radius: var(--radius-sm);
   padding: 0.6rem 0.9rem;
   font-size: 0.85rem;
-  box-shadow: 0 6px 16px rgba(0, 0, 0, 0.35);
+  box-shadow: var(--shadow-md);
   opacity: 0;
-  transform: translateY(6px);
-  transition: all 0.2s ease;
+  transform: translateY(6px) scale(0.98);
+  transition: opacity var(--duration-base) var(--ease-out-spring),
+    transform var(--duration-base) var(--ease-out-spring);
 }
 
 .toast.show {
   opacity: 1;
-  transform: translateY(0);
+  transform: translateY(0) scale(1);
 }
 
 .toast.success {
@@ -915,12 +986,15 @@ tbody tr:hover {
 .modal-backdrop {
   position: fixed;
   inset: 0;
-  background: rgba(2, 6, 16, 0.6);
+  background: rgba(2, 6, 16, 0.55);
+  backdrop-filter: blur(6px);
   display: flex;
   align-items: center;
   justify-content: center;
   z-index: 70;
   padding: 1rem;
+  opacity: 0;
+  transition: opacity var(--duration-base) ease;
 }
 
 .modal {
@@ -929,6 +1003,20 @@ tbody tr:hover {
   border-radius: var(--radius-lg);
   padding: 1.25rem;
   width: min(26rem, 100%);
+  box-shadow: var(--shadow-md);
+  opacity: 0;
+  transform: scale(0.95);
+  transition: opacity var(--duration-base) var(--ease-out-spring),
+    transform var(--duration-base) var(--ease-out-spring);
+}
+
+#modal-host.show .modal-backdrop {
+  opacity: 1;
+}
+
+#modal-host.show .modal {
+  opacity: 1;
+  transform: scale(1);
 }
 
 .modal h2 {
@@ -1049,4 +1137,35 @@ tbody tr:hover {
 
 .bulk-bar.hidden {
   display: none;
+}
+
+/* ------------------------------------------------- reduced motion/transparency */
+
+@media (prefers-reduced-motion: reduce) {
+  .spin {
+    animation: none;
+  }
+
+  .progress-bar.indeterminate .progress-fill {
+    animation: none;
+    width: 55%;
+    opacity: 0.6;
+  }
+
+  .stat-card:hover,
+  .stat-card:active {
+    transform: none;
+  }
+}
+
+@media (prefers-reduced-transparency: reduce) {
+  .toast {
+    backdrop-filter: none;
+    background: var(--bg-card);
+  }
+
+  .modal-backdrop {
+    backdrop-filter: none;
+    background: rgba(2, 6, 16, 0.92);
+  }
 }
