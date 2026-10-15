@@ -172,24 +172,42 @@ class DashboardService:
         """Dashboard v2 Fase 1 §6: worker health, stat buckets, active/attention
         jobs and recent activity — all from aggregated queries, never a full
         table scan. Buckets are mutually exclusive by construction (§6.2);
-        ``skipped``/``cancelled`` jobs are counted in none of them."""
+        ``skipped``/``cancelled`` jobs are counted in none of them.
+
+        Dubbing is paused behind ``dubbing.enabled`` (default false); while
+        paused, every bucket here is scoped to subtitle jobs so a stray
+        dubbing job from before the pause does not read as active work the
+        feature still offers. The job itself is untouched and still visible
+        on the Jobs page."""
         health = check_health(self.config)
-        counts = self.repository.count_by_state()
+        dubbing_enabled = self.config.dubbing.enabled
+        kind = None if dubbing_enabled else JobKind.SUBTITLES
         stats = {
-            "running": counts.get(JobState.RUNNING, 0),
-            "waiting": counts.get(JobState.QUEUED, 0) + counts.get(JobState.RETRY_WAIT, 0),
-            "completed": counts.get(JobState.COMPLETED, 0),
-            "attention": counts.get(JobState.FAILED, 0) + counts.get(JobState.NEEDS_REVIEW, 0),
-            "ready_to_publish": counts.get(JobState.READY_TO_PUBLISH, 0),
+            "running": self.repository.count_jobs(state=JobState.RUNNING, job_kind=kind),
+            "waiting": self.repository.count_jobs(
+                states=(JobState.QUEUED, JobState.RETRY_WAIT), job_kind=kind
+            ),
+            "completed": self.repository.count_jobs(state=JobState.COMPLETED, job_kind=kind),
+            "attention": self.repository.count_jobs(
+                states=(JobState.FAILED, JobState.NEEDS_REVIEW), job_kind=kind
+            ),
+            "ready_to_publish": self.repository.count_jobs(
+                state=JobState.READY_TO_PUBLISH, job_kind=kind
+            ),
         }
-        active = self.repository.list_jobs(state=JobState.RUNNING, limit=_OVERVIEW_LIST_LIMIT)
+        active = self.repository.list_jobs(
+            state=JobState.RUNNING, job_kind=kind, limit=_OVERVIEW_LIST_LIMIT
+        )
         attention = self.repository.list_jobs(
-            states=(JobState.FAILED, JobState.NEEDS_REVIEW), limit=_OVERVIEW_LIST_LIMIT
+            states=(JobState.FAILED, JobState.NEEDS_REVIEW),
+            job_kind=kind,
+            limit=_OVERVIEW_LIST_LIMIT,
         )
         events = self.repository.list_recent_job_events(limit=_OVERVIEW_ACTIVITY_LIMIT)
         return {
             "ok": True,
             "worker": {"online": health.healthy, "reason": health.reason},
+            "dubbing_enabled": dubbing_enabled,
             "stats": stats,
             "active_jobs": [self._job_payload(job) for job in active],
             "attention_jobs": [self._job_payload(job) for job in attention],
@@ -422,6 +440,7 @@ class DashboardService:
         return {
             "ok": True,
             "writable": self.settings_writable,
+            "dubbing_enabled": self.config.dubbing.enabled,
             "media_roots_overridden": bool(
                 read_runtime_settings(self.config.state_dir).get("media_roots")
             ),

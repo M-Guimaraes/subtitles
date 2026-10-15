@@ -347,6 +347,9 @@ async function populateTargetLanguages(root, params) {
         )
         .join("");
     select.disabled = false;
+    if (!settings.dubbing_enabled) {
+      root.querySelector('#kind-select option[value="dubbing"]')?.remove();
+    }
   } catch {
     // Settings failing to load should not block the job table itself.
   }
