@@ -3,9 +3,11 @@
 #
 #   docker compose -f compose.yaml -f compose.offline.yaml -f compose.dashboard.yaml up -d
 #
-# The published port is host loopback only. Do not change that to a public
-# address unless NAS_SUBS_DASHBOARD_TOKEN is set. This UI is administrative
-# and is not safe on the public internet without authentication.
+# The published port defaults to host loopback only. Set DASHBOARD_BIND_HOST
+# in .env to publish on a LAN address instead (e.g. the NAS's own IP, next to
+# your other apps) — but only together with NAS_SUBS_DASHBOARD_TOKEN. This UI
+# is administrative (it can cancel/delete jobs and edit media roots) and is
+# not safe on the LAN, let alone the public internet, without authentication.
 services:
   dashboard:
     build: .
@@ -33,7 +35,7 @@ services:
       HF_HOME: /models/huggingface
       NAS_SUBS_DASHBOARD_TOKEN: ${NAS_SUBS_DASHBOARD_TOKEN:-}
     ports:
-      - "127.0.0.1:8787:8787"
+      - "${DASHBOARD_BIND_HOST:-127.0.0.1}:8787:8787"
     volumes:
       - type: bind
         source: ${MEDIA_HOST_PATH:-/nas/media}
