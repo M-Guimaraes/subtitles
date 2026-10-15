@@ -33,6 +33,10 @@ WORKDIR /app
 # Dependencies resolve from the committed lock only, so the build is
 # reproducible and a source edit does not invalidate this layer.
 COPY pyproject.toml uv.lock README.md ./
+# Some dependencies (sphn via demucs) have no aarch64 wheel and build from source.
+RUN apt-get update && apt-get install -y --no-install-recommends build-essential cmake && rm -rf /var/lib/apt/lists/*
+# audiopus_sys bundles an old Opus whose CMakeLists is rejected by CMake 4.x.
+ENV CMAKE_POLICY_VERSION_MINIMUM=3.5
 RUN uv sync --frozen --no-dev --no-install-project
 
 COPY src ./src
