@@ -95,7 +95,7 @@ function activityRow(item) {
       <span class="activity-dot level-${escapeHtml(item.level)}"></span>
       <span class="activity-body">
         <span class="activity-title">${escapeHtml(item.title || "—")}</span>
-        <span class="muted small">${escapeHtml(eventLabel(item.code))}</span>
+        <span class="muted small">${escapeHtml(eventLabel(item.code, item))}</span>
       </span>
     </a>`;
 }

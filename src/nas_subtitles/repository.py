@@ -51,7 +51,16 @@ from .domain import (
 from .logging_setup import event_payload
 from .states import ensure_transition
 
-__all__ = ["SqliteJobRepository", "StateDirLock", "open_repository"]
+__all__ = [
+    "JOB_QUEUED_EVENT",
+    "JOB_STARTED_EVENT",
+    "STAGE_STARTED_EVENT",
+    "SqliteJobRepository",
+    "StateDirLock",
+    "job_state_event_code",
+    "open_repository",
+    "transition_event",
+]
 
 _MIGRATIONS_DIR = Path(__file__).resolve().parent / "migrations"
 
@@ -69,6 +78,56 @@ _JOB_SORT_COLUMNS: Mapping[str, str] = {
     "title_asc": "relative_path COLLATE NOCASE ASC",
     "title_desc": "relative_path COLLATE NOCASE DESC",
 }
+
+
+JOB_QUEUED_EVENT = "job_queued"
+"""A new job row was inserted (deduplicated enqueues record nothing)."""
+JOB_STARTED_EVENT = "job_started"
+"""The worker claimed the job, or a transition moved it back to ``running``."""
+STAGE_STARTED_EVENT = "stage_started"
+"""A running job entered a pipeline stage; ``payload.stage`` names it."""
+
+_STATE_EVENT_LEVELS: Mapping[JobState, EventLevel] = {
+    JobState.FAILED: EventLevel.ERROR,
+    JobState.NEEDS_REVIEW: EventLevel.WARNING,
+    JobState.RETRY_WAIT: EventLevel.WARNING,
+}
+
+
+def job_state_event_code(state: JobState) -> str:
+    """Timeline code for a job entering ``state``: ``job_<state>``."""
+    return f"job_{state}"
+
+
+def transition_event(
+    *,
+    previous: JobState,
+    state: JobState,
+    stage: PipelineStage | None,
+    error_code: ErrorCode | None,
+    stage_given: bool,
+) -> tuple[EventLevel, str, dict[str, object]] | None:
+    """The timeline event a ``transition()`` records, or ``None``.
+
+    A running-to-running transition only counts when it names a stage. The
+    payload carries enum values only: no paths, no ``error_detail``, no text.
+    """
+    if state is JobState.RUNNING:
+        if previous is JobState.RUNNING:
+            if not stage_given or stage is None:
+                return None
+            return EventLevel.INFO, STAGE_STARTED_EVENT, {"stage": str(stage)}
+        payload: dict[str, object] = {"from": str(previous)}
+        if stage is not None:
+            payload["stage"] = str(stage)
+        return EventLevel.INFO, JOB_STARTED_EVENT, payload
+    payload = {"from": str(previous)}
+    if stage is not None:
+        payload["stage"] = str(stage)
+    if error_code is not None:
+        payload["error_code"] = str(error_code)
+    level = _STATE_EVENT_LEVELS.get(state, EventLevel.INFO)
+    return level, job_state_event_code(state), payload
 
 
 class StateDirLock:
@@ -229,6 +288,9 @@ class SqliteJobRepository:
                     dubbing_profile,
                 ),
             )
+            self._insert_event(
+                job_id=job_id, level=EventLevel.INFO, code=JOB_QUEUED_EVENT, payload={}, now=now
+            )
         job = self.get_job(job_id)
         if job is None:
             raise NasSubtitlesError("enqueued job could not be read back", code=ErrorCode.IO_ERROR)
@@ -309,8 +371,9 @@ class SqliteJobRepository:
 
     def list_recent_job_events(self, *, limit: int = 10) -> tuple[JobEvent, ...]:
         """Events tied to a job, most recent first; excludes ``worker_heartbeat``
-        (``job_id IS NULL``), which is not job activity. See the Fase 0 audit
-        (docs/dashboard-v2-audit.md §4): only ``language_decision`` exists today."""
+        (``job_id IS NULL``), which is not job activity. Besides
+        ``language_decision``, every enqueue, claim, stage change and state
+        change records a timeline event (see :func:`transition_event`)."""
         rows = (
             self._connection_or_raise()
             .execute(
@@ -371,6 +434,13 @@ class SqliteJobRepository:
                     increment,
                     job.id,
                 ),
+            )
+            self._insert_event(
+                job_id=job.id,
+                level=EventLevel.INFO,
+                code=JOB_STARTED_EVENT,
+                payload={"attempt": attempt_count},
+                now=now,
             )
         claimed = self.get_job(job.id)
         if claimed is None:
@@ -434,6 +504,16 @@ class SqliteJobRepository:
                     job_id,
                 ),
             )
+            timeline = transition_event(
+                previous=job.state,
+                state=state,
+                stage=stage or job.current_stage,
+                error_code=error_code,
+                stage_given=stage is not None,
+            )
+            if timeline is not None:
+                level, code, payload = timeline
+                self._insert_event(job_id=job_id, level=level, code=code, payload=payload, now=now)
         updated = self.require_job(job_id)
         return updated
 
@@ -507,6 +587,13 @@ class SqliteJobRepository:
                 WHERE id = ?
                 """,
                 (str(JobState.READY_TO_PUBLISH), _iso(now), _iso(now), job_id),
+            )
+            self._insert_event(
+                job_id=job_id,
+                level=EventLevel.INFO,
+                code=job_state_event_code(JobState.READY_TO_PUBLISH),
+                payload={"from": str(job.state), "approved": True},
+                now=now,
             )
         return self.require_job(job_id)
 
@@ -622,22 +709,32 @@ class SqliteJobRepository:
         return tuple(_artifact_from_row(row) for row in rows)
 
     def append_event(self, event: JobEvent) -> None:
-        now = event.created_at or datetime.now(tz=UTC)
-        payload = canonical_json(event_payload(event.payload))
         with self._transaction(immediate=True):
-            self._connection_or_raise().execute(
-                """
-                INSERT INTO events (job_id, level, code, payload_json, created_at)
-                VALUES (?, ?, ?, ?, ?)
-                """,
-                (
-                    event.job_id,
-                    str(event.level),
-                    event.code,
-                    payload,
-                    _iso(now),
-                ),
+            self._insert_event(
+                job_id=event.job_id,
+                level=event.level,
+                code=event.code,
+                payload=event.payload,
+                now=event.created_at or datetime.now(tz=UTC),
             )
+
+    def _insert_event(
+        self,
+        *,
+        job_id: str | None,
+        level: EventLevel,
+        code: str,
+        payload: Mapping[str, object],
+        now: datetime,
+    ) -> None:
+        """Insert one ``events`` row; the caller owns the transaction."""
+        self._connection_or_raise().execute(
+            """
+            INSERT INTO events (job_id, level, code, payload_json, created_at)
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            (job_id, str(level), code, canonical_json(event_payload(payload)), _iso(now)),
+        )
 
     def latest_event_at(self, *, code: str) -> datetime | None:
         row = (

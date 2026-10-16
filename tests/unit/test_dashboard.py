@@ -236,7 +236,8 @@ def test_dashboard_overview_recent_activity_excludes_heartbeat(config: AppConfig
     repo.append_event(JobEvent(level=EventLevel.INFO, code="worker_heartbeat", payload={}))
     overview = service.dashboard_overview()
     repo.close()
-    assert [item["code"] for item in overview["recent_activity"]] == ["language_decision"]
+    codes = [item["code"] for item in overview["recent_activity"]]
+    assert codes == ["language_decision", "job_queued"]
     assert overview["recent_activity"][0]["job_id"] == job.id
     assert overview["recent_activity"][0]["title"] == Path(job.relative_path).name
 

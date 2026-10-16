@@ -75,6 +75,12 @@ pertencem às stages 7 e 3, não à stage "003. dashboard" (que só pode tocar
 cross-stage que precisa ser decidida explicitamente antes de prometer a
 timeline da seção 15, e não é um trabalho "só de frontend".
 
+> **Atualização (2026-10-16):** resolvido. `repository.py` agora grava
+> `job_queued`, `job_started`, `stage_started` e `job_<estado>` na mesma
+> transação de cada enqueue, claim, `transition()` e aprovação, então a
+> timeline cobre todo job sem `append_event()` novo em
+> `pipeline.py`/`worker.py`/`discovery.py`.
+
 ## 5. Progresso disponível de fato
 
 `list_artifacts(job_id, stage=...)` dá a contagem real de chunks já

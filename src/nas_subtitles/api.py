@@ -554,16 +554,17 @@ class DashboardService:
         return job_summary(job, config=self.config, language=language)
 
     def _activity_payload(self, event: JobEvent) -> dict[str, object]:
-        """Dashboard v2 §7.5: a recent-activity row. Only ``language_decision``
-        exists today (see docs/dashboard-v2-audit.md §4) — ``code`` is passed
-        through as-is rather than inventing a friendly label for events that
-        do not exist yet."""
+        """Dashboard v2 §7.5: a recent-activity row. ``code`` is passed through
+        as-is; ``stage`` and ``error_code`` are copied from timeline events
+        (enum values only) so the frontend can say which stage or error."""
         job = self.repository.get_job(event.job_id) if event.job_id else None
         return {
             "job_id": event.job_id,
             "title": Path(job.relative_path).name if job is not None else None,
             "code": event.code,
             "level": str(event.level),
+            "stage": event.payload.get("stage"),
+            "error_code": event.payload.get("error_code"),
             "created_at": event.created_at.isoformat() if event.created_at else None,
         }
 
