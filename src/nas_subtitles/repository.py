@@ -545,6 +545,26 @@ class SqliteJobRepository:
                 connection.execute(f"DELETE FROM {table} WHERE job_id = ?", (job_id,))
             connection.execute("DELETE FROM jobs WHERE id = ?", (job_id,))
 
+    def clear_job_output(self, job_id: str) -> JobRecord:
+        """Forget a job's published sidecar path after the caller deleted the
+        file itself. Only a terminal job can be cleared; the pipeline state
+        and every other field are untouched — this is not a state transition,
+        just correcting the record to match a file that no longer exists.
+        """
+        job = self.require_job(job_id)
+        if job.state not in TERMINAL_JOB_STATES:
+            raise NasSubtitlesError(
+                f"job {job_id} is {job.state}; only a finished job's output can be cleared",
+                code=ErrorCode.INVALID_STATE_TRANSITION,
+                detail={"job_id": job_id, "state": str(job.state)},
+            )
+        with self._transaction(immediate=True):
+            self._connection_or_raise().execute(
+                "UPDATE jobs SET output_path = NULL, updated_at = ? WHERE id = ?",
+                (_iso(datetime.now(tz=UTC)), job_id),
+            )
+        return self.require_job(job_id)
+
     # -- artifacts, events and metrics ------------------------------------- #
 
     def record_artifact(self, artifact: ArtifactRecord) -> ArtifactRecord:

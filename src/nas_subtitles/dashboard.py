@@ -211,6 +211,10 @@ def make_handler(service: DashboardService, bind: DashboardBind) -> type[BaseHTT
                 return service.cancel_job(_job_id_from_path(path, suffix="/cancel"))
             if method == "POST" and path.endswith("/reprocess"):
                 return service.reprocess_job(_job_id_from_path(path, suffix="/reprocess"))
+            if method == "POST" and path.endswith("/delete-subtitle"):
+                return service.delete_published_subtitle(
+                    _job_id_from_path(path, suffix="/delete-subtitle")
+                )
             if method == "POST" and path == "/api/scan":
                 return service.rescan()
             if method == "GET" and path == "/api/settings":

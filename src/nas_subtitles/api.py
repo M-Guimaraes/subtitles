@@ -40,6 +40,7 @@ from .domain import (
     stages_for,
 )
 from .health import HealthReport, check_health
+from .logging_setup import path_token
 from .output import manifest_path_for, read_manifest_payload
 from .states import can_transition
 
@@ -86,6 +87,8 @@ class OperatorRepository(JobRepository, Protocol):
     def require_job(self, job_id: str) -> JobRecord: ...
 
     def delete_job(self, job_id: str) -> None: ...
+
+    def clear_job_output(self, job_id: str) -> JobRecord: ...
 
     def list_jobs(
         self,
@@ -346,6 +349,42 @@ class DashboardService:
         updated = self.repository.transition(job_id=job_id, state=JobState.QUEUED)
         return {"ok": True, "job": self._job_payload(updated), "action": "reprocess"}
 
+    def delete_published_subtitle(self, job_id: str) -> dict[str, object]:
+        """Remove a job's published ``.srt`` so a reprocess can publish again.
+
+        ``publish_job`` (output.py) refuses to overwrite an existing target
+        subtitle — ``output_conflict`` — so a completed job whose sidecar
+        needs a redo (e.g. it desynced) can never republish until that file
+        is gone. This deletes exactly the job's own recorded
+        ``output_path`` and nothing else: never a glob, and only a path
+        this service itself could have written (a configured media root or
+        ``output_dir``). The job keeps its state; only ``output_path`` is
+        cleared, and the operator reprocesses separately.
+        """
+        job = self.repository.require_job(job_id)
+        if job.output_path is None:
+            raise NasSubtitlesError(
+                f"job {job_id} has no published subtitle to delete",
+                code=ErrorCode.INVALID_STATE_TRANSITION,
+                detail={"job_id": job_id},
+            )
+        if job.state not in HISTORY_STATES:
+            raise NasSubtitlesError(
+                f"cannot delete the subtitle while the job is {job.state}",
+                code=ErrorCode.INVALID_STATE_TRANSITION,
+                detail={"job_id": job_id, "state": str(job.state)},
+            )
+        allowed_roots = [root.path for root in self.config.roots] + [self.config.output_dir]
+        if not any(job.output_path.is_relative_to(root) for root in allowed_roots):
+            raise NasSubtitlesError(
+                "the job's output path is outside every configured root; refusing to delete",
+                code=ErrorCode.IO_ERROR,
+                detail={"path_token": path_token(job.output_path)},
+            )
+        job.output_path.unlink(missing_ok=True)
+        updated = self.repository.clear_job_output(job_id)
+        return {"ok": True, "job": self._job_payload(updated), "action": "delete_subtitle"}
+
     def delete_jobs(self, ids: object) -> dict[str, object]:
         """Remove finished jobs from the queue database and their scratch files.
 
@@ -596,6 +635,12 @@ def available_actions(job: JobRecord) -> list[str]:
         actions.append("cancel")
     if job.state in _REPROCESS_STATES and can_transition(job.state, JobState.QUEUED):
         actions.append("reprocess")
+    if (
+        job.state in HISTORY_STATES
+        and job.output_path is not None
+        and infer_job_kind(job.job_kind) is JobKind.SUBTITLES
+    ):
+        actions.append("delete_subtitle")
     if job.state in HISTORY_STATES:
         actions.append("delete")
     return actions

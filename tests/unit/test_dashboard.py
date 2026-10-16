@@ -12,7 +12,7 @@ from pathlib import Path
 import pytest
 from typer.testing import CliRunner
 
-from nas_subtitles.api import DashboardService
+from nas_subtitles.api import DashboardService, available_actions
 from nas_subtitles.cli import app
 from nas_subtitles.config import AppConfig
 from nas_subtitles.dashboard import DASHBOARD_TOKEN_ENV, create_server
@@ -134,6 +134,51 @@ def test_cancel_and_reprocess_use_the_state_machine(config: AppConfig) -> None:
     assert cancelled["job"]["state"] == "cancelled"
     assert reprocessed["job"]["state"] == "queued"
     assert reprocessed["action"] == "reprocess"
+
+
+def test_delete_published_subtitle_unblocks_a_reprocess(config: AppConfig) -> None:
+    service, repo = _service(config)
+    job = repo.enqueue(fingerprint=_fingerprint(), pipeline_config_hash="h")
+    repo.claim_next_job(owner="w", lease_seconds=60)
+    srt = config.media_roots[0] / "episode.pt-BR.srt"
+    srt.write_text("1\n00:00:00,000 --> 00:00:01,000\nola\n", encoding="utf-8")
+    repo.transition(job_id=job.id, state=JobState.COMPLETED, output_path=srt)
+    assert "delete_subtitle" in available_actions(repo.require_job(job.id))
+
+    result = service.delete_published_subtitle(job.id)
+    repo.close()
+
+    assert not srt.exists()
+    assert result["job"]["output_path"] is None
+    assert result["job"]["state"] == "completed"
+
+
+def test_delete_published_subtitle_rejects_missing_or_unfinished(config: AppConfig) -> None:
+    service, repo = _service(config)
+    no_output = repo.enqueue(fingerprint=_fingerprint("a.mkv"), pipeline_config_hash="h")
+    repo.transition(job_id=no_output.id, state=JobState.CANCELLED)
+    with pytest.raises(NasSubtitlesError) as missing:
+        service.delete_published_subtitle(no_output.id)
+    assert missing.value.code is ErrorCode.INVALID_STATE_TRANSITION
+
+    running = repo.enqueue(fingerprint=_fingerprint("b.mkv"), pipeline_config_hash="h")
+    repo.claim_next_job(owner="w", lease_seconds=60)
+    with pytest.raises(NasSubtitlesError) as still_running:
+        service.delete_published_subtitle(running.id)
+    repo.close()
+    assert still_running.value.code is ErrorCode.INVALID_STATE_TRANSITION
+
+
+def test_delete_published_subtitle_refuses_a_path_outside_every_root(config: AppConfig) -> None:
+    service, repo = _service(config)
+    job = repo.enqueue(fingerprint=_fingerprint(), pipeline_config_hash="h")
+    repo.claim_next_job(owner="w", lease_seconds=60)
+    outside = config.media_roots[0].parent / "not-a-root" / "episode.pt-BR.srt"
+    repo.transition(job_id=job.id, state=JobState.COMPLETED, output_path=outside)
+    with pytest.raises(NasSubtitlesError) as raised:
+        service.delete_published_subtitle(job.id)
+    repo.close()
+    assert raised.value.code is ErrorCode.IO_ERROR
 
 
 def test_settings_are_read_only_and_include_language_config(config: AppConfig) -> None:

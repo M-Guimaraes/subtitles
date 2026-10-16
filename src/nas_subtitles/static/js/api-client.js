@@ -74,6 +74,8 @@ export const api = {
   retry: (id) => request(`/api/jobs/${encodeURIComponent(id)}/retry`, { method: "POST" }),
   cancel: (id) => request(`/api/jobs/${encodeURIComponent(id)}/cancel`, { method: "POST" }),
   reprocess: (id) => request(`/api/jobs/${encodeURIComponent(id)}/reprocess`, { method: "POST" }),
+  deleteSubtitle: (id) =>
+    request(`/api/jobs/${encodeURIComponent(id)}/delete-subtitle`, { method: "POST" }),
   deleteJobs: (ids) =>
     request("/api/jobs/delete", {
       method: "POST",
