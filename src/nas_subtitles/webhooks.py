@@ -57,6 +57,7 @@ MAX_WEBHOOK_BODY_BYTES = 1_048_576
 
 _PUBLIC_NETWORK_BINDS = frozenset({"0.0.0.0", "::", "[::]"})
 _TOKEN_HEADERS = ("X-Api-Key", "X-Webhook-Token")
+_SOCKET_TIMEOUT_SECONDS = 30
 
 SUPPORTED_IMPORT_EVENTS = frozenset(
     {
@@ -188,6 +189,8 @@ def make_handler(
 
     class WebhookHandler(BaseHTTPRequestHandler):
         protocol_version = "HTTP/1.1"
+        # A client that stops sending mid-request must not hold a thread forever.
+        timeout = _SOCKET_TIMEOUT_SECONDS
 
         def log_message(self, format: str, *args: object) -> None:
             del format, args
@@ -231,7 +234,16 @@ def make_handler(
             self._send_json(HTTPStatus.OK, result)
 
         def _authorised(self, query: dict[str, list[str]]) -> bool:
-            return webhook_tokens_match(_provided_token(self.headers, query), bind.token)
+            authorised = webhook_tokens_match(_provided_token(self.headers, query), bind.token)
+            if authorised and _token_came_from_query(self.headers, query):
+                # Still accepted for existing setups, but URLs end up in the
+                # *arr's own logs and in proxy logs; a header does not.
+                log_event(
+                    _LOG,
+                    "webhook token sent in the URL; prefer the X-Api-Key header",
+                    level=logging.WARNING,
+                )
+            return authorised
 
         def _read_json_object(self) -> dict[str, object]:
             raw_length = self.headers.get("Content-Length", "")
@@ -596,6 +608,14 @@ def _provided_token(headers: object, query: dict[str, list[str]]) -> str | None:
     if query_values and query_values[0].strip():
         return query_values[0].strip()
     return None
+
+
+def _token_came_from_query(headers: object, query: dict[str, list[str]]) -> bool:
+    if _header_value(headers, "Authorization").startswith("Bearer "):
+        return False
+    if any(_header_value(headers, name) for name in _TOKEN_HEADERS):
+        return False
+    return bool(query.get("token"))
 
 
 def _first_nonempty(*values: str | None) -> str | None:

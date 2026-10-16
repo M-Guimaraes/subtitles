@@ -218,7 +218,8 @@ uv run nas-subs webhooks --config /absolute/path/to/config/config.yaml
 In Sonarr or Radarr: Connect → Webhook → POST to
 `http://127.0.0.1:8788/hooks/sonarr` or `/hooks/radarr` (or `/hooks`).
 Enable On Import / On Upgrade (`Download`). Send the shared secret as
-`Authorization: Bearer <token>` or `X-Api-Key: <token>`. If Sonarr or
+`Authorization: Bearer <token>` or `X-Api-Key: <token>` (a `?token=` query
+still works but logs a warning). If Sonarr or
 Radarr reports host paths that differ from the container `media_roots`,
 add a `webhooks.path_maps` prefix rewrite. Unsupported events are ignored;
 malformed or unauthenticated requests fail closed and enqueue nothing.

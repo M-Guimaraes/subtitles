@@ -8,6 +8,7 @@ dashboard cannot stop background processing.
 
 from __future__ import annotations
 
+import hashlib
 import os
 import re
 import shutil
@@ -45,6 +46,7 @@ from .output import manifest_path_for, read_manifest_payload
 from .states import can_transition
 
 __all__ = [
+    "DESTRUCTIVE_ACTIONS",
     "HISTORY_STATES",
     "QUEUE_STATES",
     "DashboardService",
@@ -312,7 +314,7 @@ class DashboardService:
                 "quality_flags": [str(flag.code) for flag in metrics.quality_flags],
             },
             "events": [_event_payload(event) for event in events],
-            "actions": available_actions(job),
+            "actions": self._visible_actions(job),
         }
 
     def retry_job(self, job_id: str) -> dict[str, object]:
@@ -374,16 +376,45 @@ class DashboardService:
                 code=ErrorCode.INVALID_STATE_TRANSITION,
                 detail={"job_id": job_id, "state": str(job.state)},
             )
+        target = job.output_path
+        if target.is_symlink():
+            raise NasSubtitlesError(
+                "the job's output path is a symbolic link; refusing to delete",
+                code=ErrorCode.IO_ERROR,
+                detail={"path_token": path_token(target)},
+            )
+        resolved = target.resolve()
         allowed_roots = [root.path for root in self.config.roots] + [self.config.output_dir]
-        if not any(job.output_path.is_relative_to(root) for root in allowed_roots):
+        if not any(resolved.is_relative_to(root.resolve()) for root in allowed_roots):
             raise NasSubtitlesError(
                 "the job's output path is outside every configured root; refusing to delete",
                 code=ErrorCode.IO_ERROR,
-                detail={"path_token": path_token(job.output_path)},
+                detail={"path_token": path_token(target)},
             )
-        job.output_path.unlink(missing_ok=True)
+        self._ensure_unchanged_since_publish(job_id, resolved)
+        resolved.unlink(missing_ok=True)
         updated = self.repository.clear_job_output(job_id)
         return {"ok": True, "job": self._job_payload(updated), "action": "delete_subtitle"}
+
+    def _ensure_unchanged_since_publish(self, job_id: str, path: Path) -> None:
+        """Refuse when the file no longer holds what this job published.
+
+        The manifest records the SHA-256 of the subtitle the job wrote. If
+        someone replaced the file by hand, it is theirs now and must not be
+        deleted from the dashboard. Jobs without a recorded hash (older
+        manifests) keep the previous behaviour.
+        """
+        manifest = read_manifest_payload(self.config, job_id)
+        expected = manifest.get("subtitle_sha256") if manifest else None
+        if not isinstance(expected, str) or not path.is_file():
+            return
+        actual = hashlib.sha256(path.read_bytes()).hexdigest()
+        if actual != expected:
+            raise NasSubtitlesError(
+                "the subtitle was changed after it was published; delete it by hand if intended",
+                code=ErrorCode.OUTPUT_CONFLICT,
+                detail={"job_id": job_id, "path_token": path_token(path)},
+            )
 
     def delete_jobs(self, ids: object) -> dict[str, object]:
         """Remove finished jobs from the queue database and their scratch files.
@@ -551,7 +582,20 @@ class DashboardService:
         if language is None:
             stored = read_manifest_payload(self.config, job.id) if manifest is None else manifest
             language = _language_from_manifest(stored)
-        return job_summary(job, config=self.config, language=language)
+        payload = job_summary(job, config=self.config, language=language)
+        payload["actions"] = self._visible_actions(job)
+        return payload
+
+    def _visible_actions(self, job: JobRecord) -> list[str]:
+        """Hide the actions the HTTP layer would refuse with 403.
+
+        Only applies when served over HTTP (``runtime_bind_host`` set): a
+        public bind without a token is read-only for anything that deletes.
+        """
+        actions = available_actions(job)
+        if self.runtime_bind_host is None or self.settings_writable:
+            return actions
+        return [action for action in actions if action not in DESTRUCTIVE_ACTIONS]
 
     def _activity_payload(self, event: JobEvent) -> dict[str, object]:
         """Dashboard v2 §7.5: a recent-activity row. Only ``language_decision``
@@ -624,6 +668,10 @@ def _remove_job_files(config: AppConfig, job_id: str) -> None:
     directory = config.work_dir / job_id
     if directory.is_dir() and not directory.is_symlink():
         shutil.rmtree(directory, ignore_errors=True)
+
+
+DESTRUCTIVE_ACTIONS = frozenset({"delete", "delete_subtitle"})
+"""Actions that remove rows or files; they need a loopback bind or a token."""
 
 
 def available_actions(job: JobRecord) -> list[str]:
