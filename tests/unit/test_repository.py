@@ -346,8 +346,65 @@ def test_list_recent_job_events_excludes_heartbeat(config: AppConfig) -> None:
     repo.append_event(JobEvent(level=EventLevel.INFO, code=HEARTBEAT_EVENT_CODE, payload={}))
     events = repo.list_recent_job_events(limit=10)
     repo.close()
-    assert [event.code for event in events] == ["language_decision"]
+    assert [event.code for event in events] == ["language_decision", "job_queued"]
     assert all(event.job_id is not None for event in events)
+
+
+def test_lifecycle_records_a_timeline_event_per_step(config: AppConfig) -> None:
+    repo = open_repository(config)
+    job = _enqueue(repo)
+    repo.claim_next_job(owner="w", lease_seconds=60)
+    repo.transition(job_id=job.id, state=JobState.RUNNING, stage=PipelineStage.PROBE)
+    repo.transition(job_id=job.id, state=JobState.RUNNING, stage=PipelineStage.TRANSCRIBE)
+    repo.transition(job_id=job.id, state=JobState.RUNNING)
+    repo.transition(
+        job_id=job.id,
+        state=JobState.FAILED,
+        error_code=ErrorCode.IO_ERROR,
+        error_detail="/media/private/episode.mkv could not be read",
+    )
+    events = list(reversed(repo.list_events(job_id=job.id)))
+    repo.close()
+    assert [event.code for event in events] == [
+        "job_queued",
+        "job_started",
+        "stage_started",
+        "stage_started",
+        "job_failed",
+    ]
+    assert events[1].payload == {"attempt": 1}
+    assert [event.payload["stage"] for event in events[2:4]] == ["probe", "transcribe"]
+    failed = events[-1]
+    assert failed.level is EventLevel.ERROR
+    assert failed.payload == {"from": "running", "stage": "transcribe", "error_code": "io_error"}
+
+
+def test_deduplicated_enqueue_records_no_second_queued_event(config: AppConfig) -> None:
+    repo = open_repository(config)
+    first = _enqueue(repo)
+    second = _enqueue(repo)
+    events = repo.list_events(job_id=first.id)
+    repo.close()
+    assert second.id == first.id
+    assert [event.code for event in events] == ["job_queued"]
+
+
+def test_review_retry_and_approval_are_on_the_timeline(config: AppConfig) -> None:
+    repo = open_repository(config)
+    job = _enqueue(repo)
+    repo.claim_next_job(owner="w", lease_seconds=60)
+    repo.transition(
+        job_id=job.id,
+        state=JobState.NEEDS_REVIEW,
+        stage=PipelineStage.VALIDATE,
+        error_code=ErrorCode.QUALITY_GATE_FAILED,
+    )
+    repo.approve_job(job_id=job.id)
+    events = repo.list_events(job_id=job.id)
+    repo.close()
+    assert [event.code for event in events[:2]] == ["job_ready_to_publish", "job_needs_review"]
+    assert events[0].payload == {"from": "needs_review", "approved": True}
+    assert events[1].level is EventLevel.WARNING
 
 
 def test_jobs_cancel_and_retry_cli(config: AppConfig, config_path: Path) -> None:

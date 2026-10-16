@@ -41,15 +41,33 @@ export function stageLabel(stage) {
   return STAGE_LABELS[stage] || stage || "—";
 }
 
-// Only `language_decision` is a real, persisted event code today (see
-// docs/dashboard-v2-audit.md §4) — an unmapped code falls back to itself
+// Persisted event codes: `language_decision` from the pipeline plus the
+// timeline the repository records on enqueue, claim and every transition
+// (`job_<state>`, `stage_started`). An unmapped code falls back to itself
 // rather than a fabricated label (plan §15.3).
 export const EVENT_LABELS = {
   language_decision: "Idioma identificado",
+  job_queued: "Adicionado à fila",
+  job_started: "Processamento iniciado",
+  stage_started: "Etapa iniciada",
+  job_retry_wait: "Aguardando nova tentativa",
+  job_needs_review: "Precisa de revisão",
+  job_ready_to_publish: "Pronto para publicar",
+  job_completed: "Concluído",
+  job_skipped: "Ignorado",
+  job_failed: "Falhou",
+  job_cancelled: "Cancelado",
 };
 
-export function eventLabel(code) {
-  return EVENT_LABELS[code] || code;
+// `details` is the event payload (job detail) or the activity row (overview);
+// both carry `stage` / `error_code` for timeline events.
+export function eventLabel(code, details = {}) {
+  const label = EVENT_LABELS[code] || code;
+  const stage = details && details.stage;
+  const errorCode = details && details.error_code;
+  if (code === "stage_started" && stage) return `${label}: ${stageLabel(stage)}`;
+  if (errorCode) return `${label}: ${errorLabel(errorCode)}`;
+  return label;
 }
 
 // Friendly text for the 26 ErrorCode values (domain.py). An unmapped code

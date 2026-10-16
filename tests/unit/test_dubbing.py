@@ -398,11 +398,15 @@ def test_dubbing_detect_language_confident_stops_there_when_asked(
     context = _dub_context(config, repo, queued.job, transcriber=transcriber)
     result = run_job(context, stop_after=PipelineStage.DETECT_LANGUAGE)
     stored = repo.require_job(queued.job.id)
-    events = repo.list_events(job_id=queued.job.id)
+    events = [
+        event
+        for event in repo.list_events(job_id=queued.job.id)
+        if event.code == "language_decision"
+    ]
     repo.close()
     assert result.last_stage is PipelineStage.DETECT_LANGUAGE
     assert stored.state is JobState.RUNNING
-    assert [event.code for event in events] == ["language_decision"]
+    assert len(events) == 1
     assert events[0].payload["detected_language"] == "en"
     assert events[0].payload["confident"] is True
 

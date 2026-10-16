@@ -112,7 +112,7 @@ function eventsList(events) {
     .slice(0, 8)
     .map(
       (event) =>
-        `<li><span>${escapeHtml(formatClock(event.created_at))}</span><span>${escapeHtml(eventLabel(event.code))}</span></li>`,
+        `<li><span>${escapeHtml(formatClock(event.created_at))}</span><span>${escapeHtml(eventLabel(event.code, event.payload))}</span></li>`,
     )
     .join("")}</ul>`;
 }
