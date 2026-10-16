@@ -7,6 +7,7 @@ import os
 import shutil
 import sqlite3
 from datetime import UTC, datetime, timedelta
+from importlib.util import find_spec
 from pathlib import Path
 
 import pytest
@@ -59,6 +60,10 @@ from nas_subtitles.dubbing import (
 )
 from nas_subtitles.pipeline import StageContext, run_job
 from nas_subtitles.repository import open_repository
+
+requires_torch = pytest.mark.skipif(
+    find_spec("torch") is None, reason="needs the torch package (installed by uv sync)"
+)
 
 runner = CliRunner()
 
@@ -551,6 +556,7 @@ def _write_test_wav(path: Path, *, seconds: float = 1.0, rate: int = 16_000) -> 
         writer.writeframes(b"\x10\x10" * int(seconds * rate))
 
 
+@requires_torch
 def test_demucs_separator_splits_vocals_from_the_rest(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -765,6 +771,7 @@ def _queued_job(config: AppConfig, media_root: Path) -> tuple[object, JobRecord]
     return repo, queued.job
 
 
+@requires_torch
 def test_dubbing_runs_every_stage_and_stages_the_bundle(
     config: AppConfig, media_root: Path
 ) -> None:
@@ -796,6 +803,7 @@ def test_dubbing_runs_every_stage_and_stages_the_bundle(
     assert str(bundle) not in json.dumps(manifest)
 
 
+@requires_torch
 def test_dubbing_clipping_sends_the_job_to_review(config: AppConfig, media_root: Path) -> None:
     from nas_subtitles.dubbing import run_dubbing_job
 
@@ -810,6 +818,7 @@ def test_dubbing_clipping_sends_the_job_to_review(config: AppConfig, media_root:
     assert [flag.code.value for flag in result.quality.flags] == ["clipping_detected"]
 
 
+@requires_torch
 def test_dubbing_uses_an_edited_plan_instead_of_regenerating_it(
     config: AppConfig, media_root: Path
 ) -> None:
@@ -831,6 +840,7 @@ def test_dubbing_uses_an_edited_plan_instead_of_regenerating_it(
     assert synthesizer.texts == ["Texto editado à mão."]
 
 
+@requires_torch
 def test_dubbing_never_overwrites_an_existing_staging_bundle(
     config: AppConfig, media_root: Path
 ) -> None:

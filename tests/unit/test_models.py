@@ -5,6 +5,7 @@ from __future__ import annotations
 import builtins
 import sys
 import types
+from importlib.util import find_spec
 from pathlib import Path
 from typing import Any
 
@@ -34,6 +35,17 @@ from nas_subtitles.models import (
     write_model_manifest,
 )
 from nas_subtitles.translation import ArgosTranslator
+
+requires_argostranslate = pytest.mark.skipif(
+    find_spec("argostranslate") is None,
+    reason="needs the argostranslate package (installed by uv sync)",
+)
+requires_piper = pytest.mark.skipif(
+    find_spec("piper") is None, reason="needs the piper package (installed by uv sync)"
+)
+requires_demucs = pytest.mark.skipif(
+    find_spec("demucs") is None, reason="needs the demucs package (installed by uv sync)"
+)
 
 
 def _fake_stanza_module() -> tuple[types.SimpleNamespace, list[dict[str, Any]]]:
@@ -305,6 +317,7 @@ def test_argos_translator_init_does_not_import_argos(
     assert "stanza" not in imported
 
 
+@requires_argostranslate
 def test_ensure_loaded_configures_stanza_before_argos_import(
     config: AppConfig, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -389,6 +402,7 @@ def _fake_download_voice(voice: str, destination: Path, force_redownload: bool =
     (destination / f"{voice}.onnx.json").write_text("{}", encoding="utf-8")
 
 
+@requires_piper
 def test_install_piper_downloads_voice_and_records_identity(
     config: AppConfig, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -403,6 +417,7 @@ def test_install_piper_downloads_voice_and_records_identity(
     assert identity.sha256 is not None
 
 
+@requires_piper
 def test_install_piper_fails_when_download_raises(
     config: AppConfig, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -416,6 +431,7 @@ def test_install_piper_fails_when_download_raises(
     assert raised.value.code is ErrorCode.MODEL_MISSING
 
 
+@requires_piper
 def test_load_piper_offline_fails_when_voice_cannot_load(
     config: AppConfig, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -442,6 +458,7 @@ def _fake_demucs_bag() -> Any:
     return types.SimpleNamespace(models=[linear])
 
 
+@requires_demucs
 def test_install_demucs_downloads_and_hashes_weights(
     config: AppConfig, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -455,6 +472,7 @@ def test_install_demucs_downloads_and_hashes_weights(
     assert identity.sha256 is not None
 
 
+@requires_demucs
 def test_install_demucs_weights_checksum_is_stable_across_calls(
     config: AppConfig, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -466,6 +484,7 @@ def test_install_demucs_weights_checksum_is_stable_across_calls(
     assert first.sha256 == second.sha256
 
 
+@requires_demucs
 def test_load_demucs_offline_fails_when_model_cannot_load(
     config: AppConfig, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -482,6 +501,7 @@ def test_load_demucs_offline_fails_when_model_cannot_load(
     assert raised.value.code is ErrorCode.MODEL_MISSING
 
 
+@requires_piper
 def test_verify_models_dispatches_tts_and_separation_offline_loaders(
     config: AppConfig, monkeypatch: pytest.MonkeyPatch
 ) -> None:
