@@ -145,13 +145,22 @@ class DashboardService:
     """Config plus the shared queue. Never takes the worker lock.
 
     ``config`` is replaced when the media roots are changed from the dashboard;
-    ``settings_writable`` is decided by the HTTP layer (loopback or token).
+    ``settings_writable``, ``runtime_bind_host``, ``runtime_bind_port`` and
+    ``runtime_auth_required`` are decided by the HTTP layer (``make_handler``
+    in ``dashboard.py``) from the *resolved* bind — CLI flags and
+    ``NAS_SUBS_DASHBOARD_TOKEN`` included, not just what ``config.yaml``
+    says. A service built without going through the HTTP layer (tests, CLI
+    reuse) leaves the runtime fields ``None`` and ``settings()`` falls back
+    to the static config, same as before.
     """
 
     config: AppConfig
     repository: OperatorRepository
     config_path: Path | None = None
     settings_writable: bool = False
+    runtime_bind_host: str | None = None
+    runtime_bind_port: int | None = None
+    runtime_auth_required: bool | None = None
 
     def overview(self) -> dict[str, object]:
         """Counts by state plus worker liveness, for the queue landing page."""
@@ -471,9 +480,13 @@ class DashboardService:
                 "delays_seconds": list(self.config.worker.retry_delays_seconds),
             },
             "dashboard": {
-                "bind": self.config.dashboard.bind,
-                "port": self.config.dashboard.port,
-                "token_configured": bool(self.config.dashboard.token),
+                "bind": self.runtime_bind_host or self.config.dashboard.bind,
+                "port": self.runtime_bind_port or self.config.dashboard.port,
+                "token_configured": (
+                    bool(self.config.dashboard.token)
+                    if self.runtime_auth_required is None
+                    else self.runtime_auth_required
+                ),
             },
             "webhooks": {
                 "bind": self.config.webhooks.bind,

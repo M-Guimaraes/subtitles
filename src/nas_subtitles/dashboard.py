@@ -134,6 +134,9 @@ def make_handler(service: DashboardService, bind: DashboardBind) -> type[BaseHTT
     """Build a request handler closed over the service and bind settings."""
 
     service.settings_writable = bind.requires_token or bind.host in _LOOPBACK_BINDS
+    service.runtime_bind_host = bind.host
+    service.runtime_bind_port = bind.port
+    service.runtime_auth_required = bind.requires_token
 
     class DashboardHandler(BaseHTTPRequestHandler):
         protocol_version = "HTTP/1.1"

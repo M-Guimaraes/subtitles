@@ -100,3 +100,6 @@ argos-translate/
 *.bak
 *.bak-*
 *.before-*
+
+# Scratch output from the Playwright MCP browser tool
+.playwright-mcp/

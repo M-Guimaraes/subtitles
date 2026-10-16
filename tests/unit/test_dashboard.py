@@ -293,6 +293,17 @@ def test_http_requires_token_when_configured(
             headers={"Authorization": "Bearer secret-token"},
         )
         assert allowed.status == 200
+        settings = _request_json(
+            host,
+            port,
+            "GET",
+            "/api/settings",
+            headers={"Authorization": "Bearer secret-token"},
+        )
+        # The token came from NAS_SUBS_DASHBOARD_TOKEN, not config.yaml, so
+        # only the *resolved* runtime bind (not the static config, which has
+        # no token) can report this honestly.
+        assert settings["dashboard"]["token_configured"] is True
     finally:
         server.shutdown()
         server.server_close()
