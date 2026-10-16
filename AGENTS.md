@@ -18,9 +18,14 @@ uv run ruff format .                # format (CI runs --check)
 uv run mypy src                     # strict typing on src/
 uv run pytest -m 'not models'       # the suite that runs without models
 uv run pytest -m models             # smoke tests; needs installed models
+node --test 'tests/frontend/*.test.mjs'  # dashboard JS, no npm install needed
 docker compose config               # validate the Compose expansion
 docker compose build                # build the runtime image
 ```
+
+CI (`.github/workflows/ci.yml`) runs lint, format, mypy, the `not models`
+suite, the dashboard JS tests and `docker compose config` on every push and
+pull request.
 
 Add a dependency with `uv add <pkg>` (or `uv add --group dev <pkg>`) and
 commit the updated `uv.lock`. Never hand-write a version into

@@ -1,0 +1,69 @@
+# Lint, types and the test suite that runs without models, on every push and
+# pull request. Nothing here downloads models: tests marked `models` are
+# deselected, and HF_HUB_OFFLINE keeps any accidental load from fetching.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  UV_VERSION: "0.12.23" # same as the Dockerfile
+  HF_HUB_OFFLINE: "1"
+
+jobs:
+  python:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install ffmpeg
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends ffmpeg
+      - name: Install uv
+        run: python -m pip install "uv==${UV_VERSION}"
+      - uses: actions/cache@v4
+        with:
+          path: ~/.cache/uv
+          key: uv-${{ runner.os }}-${{ hashFiles('uv.lock') }}
+      - name: Install locked dependencies
+        run: uv sync --frozen --group dev
+      - name: Lint
+        run: uv run ruff check .
+      - name: Format
+        run: uv run ruff format --check .
+      - name: Types
+        run: uv run mypy src
+      - name: Tests
+        run: uv run pytest -m 'not models' --cov=nas_subtitles --cov-report=term
+
+  dashboard-js:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Dashboard tests
+        run: node --test 'tests/frontend/*.test.mjs'
+
+  compose:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate Compose files
+        run: |
+          docker compose config --quiet
+          docker compose -f compose.yaml -f compose.offline.yaml -f compose.dashboard.yaml -f compose.webhooks.yaml config --quiet

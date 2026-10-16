@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from importlib.util import find_spec
 from pathlib import Path
 
 import pytest
@@ -23,6 +24,11 @@ from nas_subtitles.translation import (
     build_translation_units,
     translate_with_cache,
     translation_cache_key,
+)
+
+requires_argostranslate = pytest.mark.skipif(
+    find_spec("argostranslate") is None,
+    reason="needs the argostranslate package (installed by uv sync)",
 )
 
 
@@ -100,6 +106,7 @@ def test_empty_translation_of_speech_is_an_error(config: AppConfig) -> None:
     assert raised.value.code is ErrorCode.EMPTY_TRANSLATION
 
 
+@requires_argostranslate
 def test_argos_translator_calls_backend_with_en_pb_for_pt_br(
     config: AppConfig, monkeypatch: pytest.MonkeyPatch
 ) -> None:

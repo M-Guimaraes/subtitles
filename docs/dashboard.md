@@ -42,6 +42,27 @@ token configurado, a API fica aberta para quem alcançar o bind. **Nunca
 exponha isso na internet pública sem um token** — é o próprio aviso que
 aparece na tela "Settings".
 
+Proteções que valem com ou sem token:
+
+- **Origem:** todo `POST /api/*` vindo de outro site (cabeçalho `Origin`
+  diferente do `Host`, `Origin: null` ou `Sec-Fetch-Site: cross-site`) volta
+  403. Corpos JSON precisam de `Content-Type: application/json`. Isso impede
+  que uma página aberta no mesmo computador mande o dashboard apagar jobs.
+- **Host (sem token):** a API só responde quando o `Host` é `localhost` ou um
+  IP literal (`127.0.0.1`, `192.168.1.20`, `[::1]`). Um nome como
+  `nas.local` volta 403, porque é o que um ataque de DNS rebinding usaria. Para
+  acessar por nome, configure um token.
+- **Ações destrutivas:** excluir jobs, excluir a legenda publicada e editar
+  bibliotecas exigem bind em loopback ou token. Num bind público sem token
+  essas rotas voltam 403 e os botões somem da tela; retry, cancel, reprocess
+  e rescan continuam.
+- **Legenda alterada:** "Excluir legenda publicada" recusa (409) se o arquivo
+  não tem mais o SHA-256 que o job gravou no manifesto, se for um link
+  simbólico, ou se o caminho resolvido sair das bibliotecas e do `output_dir`.
+- Cabeçalhos `Content-Security-Policy`, `X-Frame-Options: DENY` e
+  `Referrer-Policy: no-referrer` em todas as respostas, e timeout de 30 s por
+  conexão.
+
 ## 2. Layout geral
 
 A página tem um cabeçalho fixo (`<header class="top">`) com:
@@ -205,8 +226,9 @@ Toda a UI fala com estas rotas (todas sob `/api/`, todas JSON,
 
 Erros voltam como `{"ok": false, "error_code": ..., "message": ..., "exit_code": ...}`
 com o HTTP status mapeado em `_status_for` (404 para job não encontrado, 401
-para token ausente/errado, 409 para transição de estado inválida, 400 para o
-resto).
+para token ausente/errado, 403 para origem/host recusados ou ação destrutiva
+sem permissão, 409 para transição de estado inválida ou legenda alterada, 400
+para o resto).
 
 ### 9.1 Extensões da Fase 1 do Dashboard v2 (backend, ainda sem UI nova)
 

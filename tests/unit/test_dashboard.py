@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import dataclasses
+import hashlib
 import json
 import threading
 from datetime import UTC, datetime
@@ -401,7 +402,10 @@ def _request(
     connection = HTTPConnection(host, port, timeout=5)
     try:
         payload = None if body is None else json.dumps(body).encode("utf-8")
-        connection.request(method, path, body=payload, headers=headers or {})
+        sent_headers = dict(headers or {})
+        if payload is not None:
+            sent_headers.setdefault("Content-Type", "application/json")
+        connection.request(method, path, body=payload, headers=sent_headers)
         response = connection.getresponse()
         body = response.read()
         return type("Response", (), {"status": response.status, "body": body})()
@@ -554,7 +558,7 @@ def test_http_media_roots_is_read_only_on_a_public_bind_without_token(
         denied = _request(
             "127.0.0.1", port, "POST", "/api/settings/media-roots", body={"paths": [str(tmp_path)]}
         )
-        assert denied.status == 401
+        assert denied.status == 403
     finally:
         server.shutdown()
         server.server_close()
@@ -656,3 +660,258 @@ def test_http_delete_jobs(config: AppConfig) -> None:
         server.server_close()
         thread.join(timeout=2)
         repo.close()
+
+
+# --- Security hardening -----------------------------------------------------
+
+
+class _Running:
+    """A dashboard server on an ephemeral port, shut down on exit."""
+
+    def __init__(self, config: AppConfig, repo: object, *, host: str = "127.0.0.1") -> None:
+        self.server = create_server(config, repo, host=host, port=0)
+        self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
+        self.port = self.server.server_address[1]
+
+    def __enter__(self) -> _Running:
+        self.thread.start()
+        return self
+
+    def __exit__(self, *exc: object) -> None:
+        self.server.shutdown()
+        self.server.server_close()
+        self.thread.join(timeout=2)
+
+    def request(self, method: str, path: str, **kwargs: object) -> object:
+        return _request("127.0.0.1", self.port, method, path, **kwargs)  # type: ignore[arg-type]
+
+
+def test_http_rejects_a_cross_origin_post(config: AppConfig) -> None:
+    repo = open_repository(config)
+    job_id = _finished_job(repo, "csrf.mkv")
+    try:
+        with _Running(config, repo) as running:
+            origin = f"http://127.0.0.1:{running.port}"
+            evil = running.request(
+                "POST",
+                "/api/jobs/delete",
+                headers={"Origin": "http://evil.example"},
+                body={"ids": [job_id]},
+            )
+            assert evil.status == 403
+            cross_site = running.request(
+                "POST",
+                "/api/scan",
+                headers={"Sec-Fetch-Site": "cross-site"},
+            )
+            assert cross_site.status == 403
+            null_origin = running.request(
+                "POST", "/api/jobs/delete", headers={"Origin": "null"}, body={"ids": [job_id]}
+            )
+            assert null_origin.status == 403
+            assert repo.get_job(job_id) is not None
+
+            same = running.request(
+                "POST", "/api/jobs/delete", headers={"Origin": origin}, body={"ids": [job_id]}
+            )
+            assert same.status == 200
+            assert repo.get_job(job_id) is None
+    finally:
+        repo.close()
+
+
+def test_http_rejects_a_json_body_without_the_json_content_type(config: AppConfig) -> None:
+    """A ``text/plain`` POST is a "simple" request: no CORS preflight protects it."""
+    repo = open_repository(config)
+    job_id = _finished_job(repo, "plain.mkv")
+    try:
+        with _Running(config, repo) as running:
+            plain = running.request(
+                "POST",
+                "/api/jobs/delete",
+                headers={"Content-Type": "text/plain"},
+                body={"ids": [job_id]},
+            )
+            assert plain.status == 400
+            assert repo.get_job(job_id) is not None
+    finally:
+        repo.close()
+
+
+def test_http_blocks_dns_rebinding_without_a_token(
+    config: AppConfig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv(DASHBOARD_TOKEN_ENV, raising=False)
+    repo = open_repository(config)
+    try:
+        with _Running(config, repo) as running:
+            rebound = running.request("GET", "/api/jobs", headers={"Host": "evil.example:8787"})
+            assert rebound.status == 403
+            assert running.request("GET", "/api/jobs", headers={"Host": "localhost"}).status == 200
+            ipv6 = running.request("GET", "/api/jobs", headers={"Host": "[::1]:8787"})
+            assert ipv6.status == 200
+            lan = running.request("GET", "/api/jobs", headers={"Host": "192.168.1.20:8787"})
+            assert lan.status == 200
+            # Static assets carry no data, so they are still served.
+            assert running.request("GET", "/", headers={"Host": "evil.example"}).status == 200
+    finally:
+        repo.close()
+
+
+def test_http_accepts_any_host_name_when_a_token_is_set(
+    config: AppConfig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv(DASHBOARD_TOKEN_ENV, "secret-token")
+    repo = open_repository(config)
+    try:
+        with _Running(config, repo) as running:
+            named = running.request(
+                "GET",
+                "/api/jobs",
+                headers={"Host": "nas.local:8787", "Authorization": "Bearer secret-token"},
+            )
+            assert named.status == 200
+    finally:
+        repo.close()
+
+
+def test_http_rejects_a_wrong_token_of_the_same_length(
+    config: AppConfig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv(DASHBOARD_TOKEN_ENV, "secret-token")
+    repo = open_repository(config)
+    try:
+        with _Running(config, repo) as running:
+            wrong = running.request(
+                "GET", "/api/jobs", headers={"Authorization": "Bearer secret-tokem"}
+            )
+            assert wrong.status == 401
+            lower = running.request(
+                "GET", "/api/jobs", headers={"Authorization": "bearer secret-token"}
+            )
+            assert lower.status == 401
+    finally:
+        repo.close()
+
+
+def test_http_public_bind_without_token_cannot_delete(
+    config: AppConfig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv(DASHBOARD_TOKEN_ENV, raising=False)
+    repo = open_repository(config)
+    job_id, srt = _published(config, repo, "public", "1\n00:00:00,000 --> 00:00:01,000\nola\n")
+    failed = repo.enqueue(fingerprint=_fingerprint("public-failed.mkv"), pipeline_config_hash="h")
+    repo.claim_next_job(owner="w", lease_seconds=60)
+    repo.transition(job_id=failed.id, state=JobState.FAILED, error_code=ErrorCode.IO_ERROR)
+    try:
+        with _Running(config, repo, host="0.0.0.0") as running:
+            deleted = running.request("POST", "/api/jobs/delete", body={"ids": [job_id]})
+            assert deleted.status == 403
+            subtitle = running.request("POST", f"/api/jobs/{job_id}/delete-subtitle")
+            assert subtitle.status == 403
+            detail = json.loads(running.request("GET", f"/api/jobs/{job_id}").body)
+            assert "delete" not in detail["job"]["actions"]
+            assert "delete_subtitle" not in detail["job"]["actions"]
+            # Non-destructive actions keep working.
+            retried = running.request("POST", f"/api/jobs/{failed.id}/retry")
+            assert retried.status == 200
+        assert repo.get_job(job_id) is not None
+        assert srt.exists()
+    finally:
+        repo.close()
+
+
+def test_http_sends_security_headers(config: AppConfig) -> None:
+    repo = open_repository(config)
+    try:
+        with _Running(config, repo) as running:
+            connection = HTTPConnection("127.0.0.1", running.port, timeout=5)
+            try:
+                for path in ("/", "/api/jobs"):
+                    connection.request("GET", path)
+                    response = connection.getresponse()
+                    response.read()
+                    csp = response.getheader("Content-Security-Policy") or ""
+                    assert "default-src 'self'" in csp
+                    assert "frame-ancestors 'none'" in csp
+                    assert response.getheader("X-Frame-Options") == "DENY"
+                    assert response.getheader("X-Content-Type-Options") == "nosniff"
+                    assert response.getheader("Referrer-Policy") == "no-referrer"
+            finally:
+                connection.close()
+    finally:
+        repo.close()
+
+
+def test_http_handler_times_out_idle_sockets(config: AppConfig) -> None:
+    repo = open_repository(config)
+    try:
+        server = create_server(config, repo, host="127.0.0.1", port=0)
+        try:
+            assert server.RequestHandlerClass.timeout == 30
+        finally:
+            server.server_close()
+    finally:
+        repo.close()
+
+
+def _published(config: AppConfig, repo: object, name: str, content: str) -> tuple[str, Path]:
+    job = repo.enqueue(fingerprint=_fingerprint(f"{name}.mkv"), pipeline_config_hash="h")
+    repo.claim_next_job(owner="w", lease_seconds=60)
+    srt = config.media_roots[0] / f"{name}.pt-BR.srt"
+    srt.write_text(content, encoding="utf-8")
+    repo.transition(job_id=job.id, state=JobState.COMPLETED, output_path=srt)
+    config.manifests_dir.mkdir(parents=True, exist_ok=True)
+    manifest = {"job_id": job.id, "subtitle_sha256": hashlib.sha256(srt.read_bytes()).hexdigest()}
+    (config.manifests_dir / f"{job.id}.json").write_text(json.dumps(manifest), encoding="utf-8")
+    return job.id, srt
+
+
+def test_delete_published_subtitle_refuses_a_file_edited_after_publish(config: AppConfig) -> None:
+    service, repo = _service(config)
+    job_id, srt = _published(config, repo, "edited", "1\n00:00:00,000 --> 00:00:01,000\nola\n")
+    srt.write_text("1\n00:00:00,000 --> 00:00:01,000\nminha versao\n", encoding="utf-8")
+    with pytest.raises(NasSubtitlesError) as raised:
+        service.delete_published_subtitle(job_id)
+    repo.close()
+    assert raised.value.code is ErrorCode.OUTPUT_CONFLICT
+    assert srt.exists()
+
+
+def test_delete_published_subtitle_removes_an_unchanged_file(config: AppConfig) -> None:
+    service, repo = _service(config)
+    job_id, srt = _published(config, repo, "same", "1\n00:00:00,000 --> 00:00:01,000\nola\n")
+    service.delete_published_subtitle(job_id)
+    repo.close()
+    assert not srt.exists()
+
+
+def test_delete_published_subtitle_refuses_a_symlink(config: AppConfig, tmp_path: Path) -> None:
+    service, repo = _service(config)
+    elsewhere = tmp_path / "elsewhere.srt"
+    elsewhere.write_text("keep me", encoding="utf-8")
+    job = repo.enqueue(fingerprint=_fingerprint("link.mkv"), pipeline_config_hash="h")
+    repo.claim_next_job(owner="w", lease_seconds=60)
+    link = config.media_roots[0] / "link.pt-BR.srt"
+    link.symlink_to(elsewhere)
+    repo.transition(job_id=job.id, state=JobState.COMPLETED, output_path=link)
+    with pytest.raises(NasSubtitlesError) as raised:
+        service.delete_published_subtitle(job.id)
+    repo.close()
+    assert raised.value.code is ErrorCode.IO_ERROR
+    assert elsewhere.exists()
+
+
+def test_delete_published_subtitle_refuses_dot_dot_escapes(config: AppConfig) -> None:
+    service, repo = _service(config)
+    victim = config.media_roots[0].parent / "victim.srt"
+    victim.write_text("keep me", encoding="utf-8")
+    job = repo.enqueue(fingerprint=_fingerprint("dots.mkv"), pipeline_config_hash="h")
+    repo.claim_next_job(owner="w", lease_seconds=60)
+    sneaky = config.media_roots[0] / ".." / "victim.srt"
+    repo.transition(job_id=job.id, state=JobState.COMPLETED, output_path=sneaky)
+    with pytest.raises(NasSubtitlesError) as raised:
+        service.delete_published_subtitle(job.id)
+    repo.close()
+    assert raised.value.code is ErrorCode.IO_ERROR
+    assert victim.exists()

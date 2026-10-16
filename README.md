@@ -359,7 +359,7 @@ Em Settings → Connect → Webhook, configure POST e a URL correspondente:
 | Radarr | `http://127.0.0.1:8788/hooks/radarr` |
 | Genérico | `http://127.0.0.1:8788/hooks` |
 
-Utilize o mesmo segredo por `Authorization: Bearer <token>`, `X-Api-Key` ou `X-Webhook-Token`. A query `?token=` também é aceita; prefira cabeçalhos.
+Utilize o mesmo segredo por `Authorization: Bearer <token>`, `X-Api-Key` ou `X-Webhook-Token`. A query `?token=` também é aceita, mas gera um aviso no log porque URLs aparecem nos logs do Sonarr/Radarr e de proxies; prefira cabeçalhos.
 
 - Importação/upgrade: processado conforme o payload.
 - Evento `Test`: reconhecido, sem criar job.

@@ -8,11 +8,14 @@ layer can sit in front without rewriting routes.
 
 from __future__ import annotations
 
+import hmac
+import ipaddress
 import json
 import logging
 import os
 from collections.abc import Callable
 from dataclasses import dataclass
+from email.message import Message
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -47,6 +50,22 @@ STATIC_DIR = Path(__file__).resolve().parent / "static"
 _PUBLIC_NETWORK_BINDS = frozenset({"0.0.0.0", "::", "[::]"})
 _LOOPBACK_BINDS = frozenset({"127.0.0.1", "localhost", "::1", "[::1]"})
 _MAX_BODY_BYTES = 64 * 1024
+_SOCKET_TIMEOUT_SECONDS = 30
+_DESTRUCTIVE_POST_SUFFIXES = ("/delete-subtitle",)
+_DESTRUCTIVE_POST_PATHS = frozenset({"/api/jobs/delete", "/api/settings/media-roots"})
+_SECURITY_HEADERS = {
+    "X-Content-Type-Options": "nosniff",
+    "X-Frame-Options": "DENY",
+    "Referrer-Policy": "no-referrer",
+    "Content-Security-Policy": (
+        # Inline style attributes stay allowed: progress bars set their width
+        # that way. Scripts are limited to the dashboard's own files.
+        "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; "
+        "img-src 'self' data:; "
+        "connect-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; "
+        "form-action 'self'"
+    ),
+}
 
 
 @dataclass(frozen=True, slots=True)
@@ -140,6 +159,8 @@ def make_handler(service: DashboardService, bind: DashboardBind) -> type[BaseHTT
 
     class DashboardHandler(BaseHTTPRequestHandler):
         protocol_version = "HTTP/1.1"
+        # A client that stops sending mid-request must not hold a thread forever.
+        timeout = _SOCKET_TIMEOUT_SECONDS
 
         def log_message(self, format: str, *args: object) -> None:
             del format, args
@@ -168,11 +189,32 @@ def make_handler(service: DashboardService, bind: DashboardBind) -> type[BaseHTT
             if method == "GET" and not path.startswith("/api/"):
                 self._serve_static(path)
                 return
+            if not _host_allowed(self.headers.get("Host"), bind):
+                self._send_error(
+                    HTTPStatus.FORBIDDEN,
+                    ErrorCode.PERMISSION_DENIED,
+                    "open the dashboard by IP address or localhost, or set a dashboard token",
+                )
+                return
+            if method == "POST" and not _same_origin(self.headers):
+                self._send_error(
+                    HTTPStatus.FORBIDDEN,
+                    ErrorCode.PERMISSION_DENIED,
+                    "cross-origin requests are not allowed",
+                )
+                return
             if not self._authorised():
                 self._send_error(
                     HTTPStatus.UNAUTHORIZED,
                     ErrorCode.PERMISSION_DENIED,
                     "dashboard token required",
+                )
+                return
+            if method == "POST" and _is_destructive(path) and not service.settings_writable:
+                self._send_error(
+                    HTTPStatus.FORBIDDEN,
+                    ErrorCode.PERMISSION_DENIED,
+                    "deleting and changing settings needs a loopback bind or a dashboard token",
                 )
                 return
             try:
@@ -231,6 +273,9 @@ def make_handler(service: DashboardService, bind: DashboardBind) -> type[BaseHTT
                 length = int(self.headers.get("Content-Length", "0"))
             except ValueError as exc:
                 raise ValueError("invalid Content-Length") from exc
+            content_type = self.headers.get("Content-Type", "")
+            if content_type.split(";", 1)[0].strip().lower() != "application/json":
+                raise ValueError("send the body as application/json")
             if length <= 0 or length > _MAX_BODY_BYTES:
                 raise ValueError("send a JSON body of up to 64 KiB")
             try:
@@ -246,7 +291,7 @@ def make_handler(service: DashboardService, bind: DashboardBind) -> type[BaseHTT
                 return True
             header = self.headers.get("Authorization", "")
             expected = f"Bearer {bind.token}"
-            return header == expected
+            return hmac.compare_digest(header.encode("utf-8"), expected.encode("utf-8"))
 
         def _serve_static(self, path: str) -> None:
             relative = "index.html" if path in {"", "/"} else path.lstrip("/")
@@ -304,7 +349,8 @@ def make_handler(service: DashboardService, bind: DashboardBind) -> type[BaseHTT
             self.send_response(int(status))
             self.send_header("Content-Type", content_type)
             self.send_header("Content-Length", str(len(body)))
-            self.send_header("X-Content-Type-Options", "nosniff")
+            for key, value in _SECURITY_HEADERS.items():
+                self.send_header(key, value)
             for key, value in (extra_headers or {}).items():
                 self.send_header(key, value)
             self.end_headers()
@@ -438,4 +484,59 @@ def _status_for(code: ErrorCode) -> HTTPStatus:
         return HTTPStatus.CONFLICT
     if code is ErrorCode.LOCK_BUSY:
         return HTTPStatus.CONFLICT
+    if code is ErrorCode.OUTPUT_CONFLICT:
+        return HTTPStatus.CONFLICT
     return HTTPStatus.BAD_REQUEST
+
+
+def _is_destructive(path: str) -> bool:
+    return path in _DESTRUCTIVE_POST_PATHS or path.endswith(_DESTRUCTIVE_POST_SUFFIXES)
+
+
+def _host_allowed(host_header: str | None, bind: DashboardBind) -> bool:
+    """Block DNS rebinding when there is no token to stop it.
+
+    A rebinding attack needs a DNS name the attacker controls, so without a
+    token only ``localhost`` and literal IP addresses are accepted as
+    ``Host``. With a token the attacker's origin never sees the token.
+    """
+    if bind.requires_token:
+        return True
+    hostname = _hostname(host_header)
+    if hostname is None:
+        return False
+    if hostname == "localhost":
+        return True
+    try:
+        ipaddress.ip_address(hostname)
+    except ValueError:
+        return False
+    return True
+
+
+def _same_origin(headers: Message) -> bool:
+    """Refuse a browser POST sent from another site (CSRF).
+
+    Browsers attach ``Origin`` to every cross-site POST. A request without
+    it (curl, scripts) is not a browser being tricked, so it passes.
+    """
+    if headers.get("Sec-Fetch-Site", "").lower() == "cross-site":
+        return False
+    origin = headers.get("Origin")
+    if origin is None:
+        return True
+    parsed = urlparse(origin)
+    host = headers.get("Host")
+    return bool(parsed.netloc) and host is not None and parsed.netloc.lower() == host.lower()
+
+
+def _hostname(host_header: str | None) -> str | None:
+    if not host_header:
+        return None
+    parsed = urlparse(f"//{host_header.strip()}")
+    try:
+        hostname = parsed.hostname
+        parsed.port  # noqa: B018 - raises ValueError on a malformed port
+    except ValueError:
+        return None
+    return hostname.lower() if hostname else None

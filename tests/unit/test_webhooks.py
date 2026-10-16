@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import threading
 from datetime import UTC, datetime, timedelta
@@ -533,3 +534,44 @@ def _request_json(
     payload = json.loads(response.body.decode("utf-8"))
     assert isinstance(payload, dict)
     return payload
+
+
+def test_http_warns_when_the_token_comes_in_the_url(
+    config: AppConfig, media_root: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    video = media_root / "query-token.mkv"
+    video.write_bytes(b"q" * 32)
+    repo = open_repository(config)
+    server = create_server(_with_token(config), repo, host="127.0.0.1", port=0, probe=_FakeProbe())
+    assert server.RequestHandlerClass.timeout == 30
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    host, port = server.server_address[:2]
+    try:
+        with caplog.at_level(logging.WARNING, logger="nas_subtitles.webhooks"):
+            via_header = _request(
+                host,
+                port,
+                "POST",
+                "/hooks/sonarr",
+                headers={"X-Api-Key": _TOKEN},
+                body=_sonarr_payload(video, event_type="Test"),
+            )
+            assert via_header.status == 200
+            assert not [r for r in caplog.records if "token sent in the URL" in r.getMessage()]
+            via_query = _request(
+                host,
+                port,
+                "POST",
+                f"/hooks/sonarr?token={_TOKEN}",
+                body=_sonarr_payload(video, event_type="Test"),
+            )
+            assert via_query.status == 200
+        warnings = [r for r in caplog.records if "token sent in the URL" in r.getMessage()]
+        assert len(warnings) == 1
+        assert _TOKEN not in warnings[0].getMessage()
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2)
+        repo.close()

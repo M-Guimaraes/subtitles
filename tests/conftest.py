@@ -7,10 +7,16 @@ with FFmpeg rather than committing a file.
 
 from __future__ import annotations
 
+import os
 from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
+
+# Typer forces a styled terminal when GITHUB_ACTIONS (or FORCE_COLOR) is set,
+# and the ANSI codes split option names like ``--json`` in help output. Turn
+# that off before any test imports the CLI so help reads the same in CI.
+os.environ["_TYPER_FORCE_DISABLE_TERMINAL"] = "1"
 
 from nas_subtitles.config import AppConfig, load_config
 
