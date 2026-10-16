@@ -22,6 +22,39 @@
   --ease-out-spring: cubic-bezier(0.22, 1, 0.36, 1);
   --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.3);
   --shadow-md: 0 10px 24px rgba(0, 0, 0, 0.35);
+  --overlay-subtle: rgba(255, 255, 255, 0.08);
+  --overlay-strong: rgba(255, 255, 255, 0.15);
+  --toast-bg: rgba(21, 30, 48, 0.85);
+  --backdrop: rgba(2, 6, 16, 0.55);
+  --backdrop-solid: rgba(2, 6, 16, 0.92);
+}
+
+/* Light theme for systems set to light mode. Only the tokens change. */
+@media (prefers-color-scheme: light) {
+  :root {
+    color-scheme: light;
+    --bg-primary: #f1f5f9;
+    --bg-secondary: #ffffff;
+    --bg-card: #ffffff;
+    --bg-card-hover: #f8fafc;
+    --border: #d9e0ea;
+    --text-primary: #0f172a;
+    --text-secondary: #475569;
+    --text-muted: #5b6b80;
+    --accent: #2563eb;
+    --accent-hover: #1d4ed8;
+    --success: #15803d;
+    --warning: #b45309;
+    --danger: #dc2626;
+    --neutral: #5b6b80;
+    --shadow-sm: 0 1px 2px rgba(15, 23, 42, 0.08);
+    --shadow-md: 0 10px 24px rgba(15, 23, 42, 0.12);
+    --overlay-subtle: rgba(15, 23, 42, 0.06);
+    --overlay-strong: rgba(255, 255, 255, 0.25);
+    --toast-bg: rgba(255, 255, 255, 0.92);
+    --backdrop: rgba(15, 23, 42, 0.35);
+    --backdrop-solid: rgba(15, 23, 42, 0.7);
+  }
 }
 
 @media (prefers-reduced-motion: reduce) {
@@ -703,7 +736,7 @@ a:focus-visible {
 }
 
 .tab-count {
-  background: rgba(255, 255, 255, 0.15);
+  background: var(--overlay-strong);
   border-radius: 999px;
   padding: 0 0.4rem;
   font-size: 0.72rem;
@@ -907,7 +940,7 @@ tbody tr:active {
 }
 
 .banner code {
-  background: rgba(255, 255, 255, 0.08);
+  background: var(--overlay-subtle);
   padding: 0.05rem 0.3rem;
   border-radius: 4px;
 }
@@ -943,7 +976,7 @@ tbody tr:active {
 }
 
 .toast {
-  background: rgba(21, 30, 48, 0.85);
+  background: var(--toast-bg);
   backdrop-filter: blur(16px) saturate(160%);
   border: 1px solid var(--border);
   border-radius: var(--radius-sm);
@@ -987,7 +1020,7 @@ tbody tr:active {
 .modal-backdrop {
   position: fixed;
   inset: 0;
-  background: rgba(2, 6, 16, 0.55);
+  background: var(--backdrop);
   backdrop-filter: blur(6px);
   display: flex;
   align-items: center;
@@ -1167,6 +1200,6 @@ tbody tr:active {
 
   .modal-backdrop {
     backdrop-filter: none;
-    background: rgba(2, 6, 16, 0.92);
+    background: var(--backdrop-solid);
   }
 }

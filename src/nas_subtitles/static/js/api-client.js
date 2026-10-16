@@ -14,8 +14,21 @@ export class ApiError extends Error {
 }
 
 let unauthorizedHandler = null;
+let pendingLogin = null;
 export function onUnauthorized(handler) {
   unauthorizedHandler = handler;
+}
+
+// Several requests can hit 401 at once (the page and the worker pill on
+// first load). They all wait on one prompt instead of each opening its own,
+// which would replace the first dialog and leave its request hanging.
+function login() {
+  if (!pendingLogin) {
+    pendingLogin = Promise.resolve(unauthorizedHandler()).finally(() => {
+      pendingLogin = null;
+    });
+  }
+  return pendingLogin;
 }
 
 export function setToken(token) {
@@ -47,7 +60,7 @@ async function request(path, options = {}, { retried = false } = {}) {
     },
   });
   if (response.status === 401 && !retried && unauthorizedHandler) {
-    const authorised = await unauthorizedHandler();
+    const authorised = await login();
     if (authorised) return request(path, options, { retried: true });
   }
   let payload;
