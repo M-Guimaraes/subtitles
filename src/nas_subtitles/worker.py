@@ -40,6 +40,7 @@ from .repository import StateDirLock, open_repository
 from .states import retry_delay_seconds, should_retry
 
 __all__ = [
+    "INTERRUPTED_EVENT_CODE",
     "CleanupSummary",
     "Worker",
     "backup_state",
@@ -48,6 +49,14 @@ __all__ = [
 ]
 
 _LOG = logging.getLogger(__name__)
+
+INTERRUPTED_EVENT_CODE = "job_interrupted"
+"""Recorded each time a stop interrupts a job; ``payload.stage`` names the stage.
+
+The job row cannot carry this: ``claim_next_job`` clears ``error_code`` when
+the job is picked up again, so the event log is what remembers it.
+"""
+_INTERRUPTION_HISTORY_LIMIT = 500
 
 _JOB_ID_RE = re.compile(
     r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
@@ -232,7 +241,17 @@ class Worker:
         if job is None:
             return
         if exc.code is ErrorCode.INTERRUPTED:
-            if job.error_code is ErrorCode.INTERRUPTED and job.current_stage is not None:
+            stage = str(job.current_stage) if job.current_stage is not None else None
+            repeated = stage is not None and self._interrupted_before(job_id, stage)
+            self.repository.append_event(
+                JobEvent(
+                    job_id=job_id,
+                    level=EventLevel.WARNING,
+                    code=INTERRUPTED_EVENT_CODE,
+                    payload={"stage": stage},
+                )
+            )
+            if repeated:
                 self.repository.transition(
                     job_id=job_id,
                     state=JobState.NEEDS_REVIEW,
@@ -267,6 +286,13 @@ class Worker:
             state=JobState.FAILED,
             error_code=exc.code,
             error_detail=exc.message,
+        )
+
+    def _interrupted_before(self, job_id: str, stage: str) -> bool:
+        events = self.repository.list_events(job_id=job_id, limit=_INTERRUPTION_HISTORY_LIMIT)
+        return any(
+            event.code == INTERRUPTED_EVENT_CODE and event.payload.get("stage") == stage
+            for event in events
         )
 
 

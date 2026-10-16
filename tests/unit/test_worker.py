@@ -160,13 +160,6 @@ def test_an_interruption_requeues_the_job(config: AppConfig) -> None:
     assert first.error_code is ErrorCode.INTERRUPTED
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "known bug: claim_next_job and transition clear error_code, so "
-        "_handle_failure never sees the earlier interruption"
-    ),
-)
 def test_a_second_interruption_in_the_same_stage_asks_for_review(config: AppConfig) -> None:
     repo = open_repository(config)
     job = repo.enqueue(fingerprint=_fingerprint("stop-twice.mkv"), pipeline_config_hash="h")
@@ -259,3 +252,19 @@ def test_cleanup_drops_wavs_of_completed_jobs_and_keeps_failed_ones(config: AppC
     assert not (config.work_dir / done.id / "chunk-0000.wav").exists()
     assert (config.work_dir / done.id / "transcript.json").exists()
     assert (config.work_dir / failed.id / "chunk-0000.wav").exists()
+
+
+def test_interruptions_in_different_stages_keep_requeueing(config: AppConfig) -> None:
+    repo = open_repository(config)
+    job = repo.enqueue(fingerprint=_fingerprint("moving.mkv"), pipeline_config_hash="h")
+    worker = Worker(config, repo, owner="w")
+    _interrupt_while_transcribing(repo, worker, job.id)
+    repo.claim_next_job(owner="w", lease_seconds=60)
+    repo.transition(job_id=job.id, state=JobState.RUNNING, stage=PipelineStage.TRANSLATE)
+    worker._handle_failure(job.id, NasSubtitlesError("stopping", code=ErrorCode.INTERRUPTED))
+
+    state = repo.require_job(job.id).state
+    interruptions = [e for e in repo.list_events(job_id=job.id) if e.code == "job_interrupted"]
+    repo.close()
+    assert state is JobState.QUEUED
+    assert [e.payload for e in interruptions] == [{"stage": "translate"}, {"stage": "transcribe"}]
